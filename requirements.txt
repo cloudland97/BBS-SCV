@@ -1,0 +1,6 @@
+# Compatible-release pins: lock the major that the code's API targets,
+# auto-accept patches within it, block the next breaking major. No manual
+# re-pinning needed on updates; a clean install just works.
+python-telegram-bot~=22.7  # v22 API (HTTPXRequest httpx_kwargs, get_updates_request); v20/v21 break
+aiohttp~=3.9
+tzdata

@@ -1,0 +1,360 @@
+"""Commands: Discord bot management (!re, !dm, !ud, !log, !hp, !today)."""
+
+import asyncio
+import re
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import aiohttp
+from telegram import Update
+from telegram.ext import ContextTypes
+
+import tg_config as _cfg
+import tg_utils as _utils
+import discord_helpers as _dh
+from tg_config import KST as _KST
+from tg_utils import admin_only, _to_kst, ensure_utc
+
+
+@admin_only
+async def cmd_drestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!re — restart the Discord bot, then check log for errors."""
+    _cfg.log.info("Discord bot restart requested")
+    await update.message.reply_text("🔄 Discord 봇 재시작 중...")
+    discord_path = _cfg.PROJECTS["discord"]
+    try:
+        ps_command = (
+            "$cmd = Get-CimInstance Win32_Process | "
+            f"Where-Object {{ $_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*{discord_path}*run.bat*' }}; "
+            "$py = Get-CimInstance Win32_Process | "
+            f"Where-Object {{ $_.Name -eq 'python.exe' -and $_.CommandLine -like '*bot.py*' -and $_.CommandLine -like '*{discord_path}*' }}; "
+            "$killed = @(); "
+            "$pids = @(); "
+            "foreach ($p in @($cmd) + @($py)) { if ($p) { $pids += $p.ProcessId; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $killed += [string]$p.ProcessId } }; "
+            "if ($pids.Count -gt 0) { "
+            "  $deadline = (Get-Date).AddSeconds(5); "
+            "  do { Start-Sleep -Milliseconds 300; $still = @($pids | Where-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue) -ne $null }) } while ($still.Count -gt 0 -and (Get-Date) -lt $deadline) "
+            "}; "
+            f"$proc = Start-Process -WindowStyle Minimized -FilePath 'cmd.exe' -ArgumentList '/c', '{discord_path}\\run.bat' -WorkingDirectory '{discord_path}' -PassThru; "
+            "Start-Sleep -Milliseconds 800; "
+            "if ($proc -and -not $proc.HasExited) { $killed += 'started' } else { $killed += 'spawn-failed' }; "
+            "$killed -join ','"
+        )
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["powershell", "-Command", ps_command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        killed = result.stdout.strip()
+        err = result.stderr.strip()
+        if "spawn-failed" in killed:
+            # New process image exited immediately — treat as a failed spawn.
+            _cfg.log.error(f"Discord restart: new process failed to start stderr={err}")
+            await update.message.reply_text(
+                "❌ 새 Discord 봇 프로세스가 시작 직후 종료됐습니다. run.bat 확인 필요."
+            )
+        elif killed:
+            _cfg.log.info(f"Discord restart processed: {killed}")
+            await update.message.reply_text(f"✅ Discord 재시작 처리 완료: {killed}")
+        else:
+            _cfg.log.warning(f"Discord restart: no target found stderr={err}")
+            await update.message.reply_text(
+                "⚠️ 재시작 대상 프로세스를 찾지 못했고 새 run.bat도 시작하지 못했습니다."
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 재시작 실패: {e}")
+        _cfg.log.error(f"Discord bot restart failed: {e}")
+        return
+
+    # Check the latest Discord bot log for errors after a short delay
+    await asyncio.sleep(6)
+    try:
+        today = datetime.now(_KST).strftime("%Y-%m-%d")
+        log_file = _cfg.DISCORD_LOGS_PATH / f"bot_{today}.txt"
+        if log_file.exists():
+            lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            tail = lines[-10:] if len(lines) >= 10 else lines
+            # Line-anchored match: only real error markers, not benign lines that
+            # merely contain the substring "Error" (e.g. "0 errors", "ErrorLevel").
+            has_error = any(
+                "[ERROR]" in ln
+                or ln.lstrip().startswith("Traceback")
+                or ln.lstrip().startswith("SyntaxError")
+                for ln in tail
+            )
+            if has_error:
+                await update.message.reply_text(
+                    "⚠️ *재시작 후 오류 감지*\n```\n" + "\n".join(tail[-5:]) + "\n```",
+                    parse_mode="Markdown",
+                )
+    except Exception as e:
+        _cfg.log.warning(f"Post-restart log check failed: {e}")
+
+
+@admin_only
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!sync — Write sync flag to BBS dir and restart Discord bot to sync slash commands."""
+    discord_path = Path(_cfg.PROJECTS["discord"])
+    flag = discord_path / ".sync_flag"
+    try:
+        flag.write_text("sync", encoding="utf-8")
+        _cfg.log.info("sync flag written: %s", flag)
+    except Exception as e:
+        await update.message.reply_text(f"❌ sync 플래그 생성 실패: {e}")
+        return
+    await update.message.reply_text("🔄 sync 플래그 설정. Discord 봇 재시작 중...")
+    await cmd_drestart.__wrapped__(update, context)
+
+
+@admin_only
+async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!dm <userID> <message> — send a Discord DM to a specific user."""
+    text = (update.message.text or "").strip()
+    rest = text[len("!dm"):].strip()
+    parts = rest.split(" ", 1)
+    if len(parts) < 2 or not parts[0].isdigit():
+        await update.message.reply_text(
+            "사용법: `!dm <userID> <message>`\n예시: `!dm 123456789012345678 안녕하세요`",
+            parse_mode="Markdown",
+        )
+        return
+
+    user_id = int(parts[0])
+    message = parts[1].strip()
+    if not message:
+        await update.message.reply_text("❌ 메시지 내용을 입력해주세요.")
+        return
+
+    token = _dh._get_discord_token()
+    if not token:
+        await update.message.reply_text("❌ Discord 토큰을 찾을 수 없어요.")
+        return
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as session:
+            ok = await _dh._send_discord_dm(session, token, user_id, message)
+        if ok:
+            await update.message.reply_text(
+                f"✅ DM 발송 완료 → `{user_id}`", parse_mode="Markdown"
+            )
+            _cfg.log.info(f"DM sent to {user_id}")
+        else:
+            await update.message.reply_text(
+                f"❌ DM 발송 실패 → `{user_id}`", parse_mode="Markdown"
+            )
+            _cfg.log.warning(f"DM failed to {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ 오류: {e}")
+        _cfg.log.error(f"cmd_dm error: {e}")
+
+
+@admin_only
+async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!ud [userID] — View stored user DMs. No arg = summary, with arg = messages."""
+    conn = _cfg.open_db()
+    if conn is None:
+        await update.message.reply_text("DB not found.")
+        return
+
+    text = (update.message.text or "").strip()
+    arg = text[len("!ud"):].strip()
+
+    try:
+        if arg and arg.isdigit():
+            uid = int(arg)
+            rows = conn.execute(
+                "SELECT content, created_at FROM user_dm"
+                " WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+                (uid,),
+            ).fetchall()
+            if not rows:
+                await update.message.reply_text(f"No DMs from {uid}")
+                return
+            names = await _dh._fetch_discord_usernames([str(uid)])
+            name = names.get(str(uid), str(uid))
+            lines = [f"*{name}* (`{uid}`) DM ({len(rows)})\n"]
+            for r in rows:
+                ts = _to_kst(r["created_at"])
+                content = r["content"][:80]
+                lines.append(f"`{ts}` {content}")
+            await _utils.safe_reply(update.message, "\n".join(lines))
+        else:
+            rows = conn.execute(
+                "SELECT user_id, COUNT(*) as cnt, MAX(created_at) as last_at"
+                " FROM user_dm GROUP BY user_id ORDER BY last_at DESC"
+            ).fetchall()
+            if not rows:
+                await update.message.reply_text("No DMs stored.")
+                return
+            all_uids = [str(r["user_id"]) for r in rows]
+            names = await _dh._fetch_discord_usernames(all_uids)
+            lines = ["*User DM Log*\n"]
+            for r in rows:
+                uid_str = str(r["user_id"])
+                name = names.get(uid_str, uid_str)
+                last = _to_kst(r["last_at"]) if r["last_at"] else "?"
+                lines.append(f"*{name}* (`{uid_str}`) — {r['cnt']}건 (last: {last})")
+            await _utils.safe_reply(update.message, "\n".join(lines))
+    finally:
+        conn.close()
+
+
+@admin_only
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!log [N] — Show Discord bot error log. N = days ago (default 0 = today)."""
+    text = (update.message.text or "").strip()
+    arg = text[len("!log"):].strip()
+
+    m = re.match(r"^(\d+)d?$", arg)
+    days_ago = int(m.group(1)) if m else 0
+
+    target_date = (datetime.now(_KST) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+    err_file = _cfg.DISCORD_LOGS_PATH / f"error_{target_date}.log"
+    label = "오늘" if days_ago == 0 else f"{days_ago}일 전 ({target_date})"
+
+    if not err_file.exists():
+        await _utils.safe_reply(update.message, f"No error log for {target_date}")
+        return
+
+    try:
+        raw = err_file.read_text(encoding="utf-8")
+    except Exception:
+        raw = ""
+
+    if not raw.strip():
+        await _utils.safe_reply(update.message, f"No errors {label}")
+        return
+
+    tail = raw[-2000:] if len(raw) > 2000 else raw
+    lines = tail.strip().split("\n")
+    total = raw.count("[ERROR]")
+    header = f"*Error Log* ({label}) — {total} error(s)\n\n"
+    body = "\n".join(f"`{ln[:120]}`" for ln in lines[-20:])
+    await _utils.safe_reply(update.message, header + body)
+
+
+@admin_only
+async def cmd_hp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!hp — Discord bot loop health from SQLite loop_health table."""
+    conn = _cfg.open_db()
+    if conn is None:
+        await update.message.reply_text("DB not found.")
+        return
+
+    now_kst = datetime.now(_KST)
+    dates = [(now_kst - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
+
+    try:
+        health = {
+            r["loop_id"]: r
+            for r in conn.execute(
+                "SELECT loop_id, last_run FROM loop_health"
+            ).fetchall()
+        }
+        daily_rows = conn.execute(
+            "SELECT loop_id, date, run_count FROM loop_health_daily WHERE date IN (?,?,?)",
+            dates,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    daily: dict[str, dict[str, int]] = {}
+    for r in daily_rows:
+        daily.setdefault(r["loop_id"], {})[r["date"]] = r["run_count"]
+
+    loop_ids = sorted(health.keys())
+    now_utc = datetime.now(timezone.utc)
+    header = f"🔍 *Loop Health* — {now_kst.strftime('%m/%d %H:%M')} KST\n"
+    header += f"`{'Loop':<16} {'마지막':>8}  {'D':>5} {'D-1':>5} {'D-2':>5}`\n"
+    lines = [header]
+
+    for loop_id in loop_ids:
+        desc = loop_id.removesuffix("_loop")
+        row = health.get(loop_id)
+        if row:
+            last_dt = ensure_utc(datetime.fromisoformat(row["last_run"]))
+            diff = now_utc - last_dt
+            mins = int(diff.total_seconds() // 60)
+            age = f"{mins}분" if mins < 60 else f"{mins // 60}h{mins % 60}m"
+            d0 = daily.get(loop_id, {}).get(dates[0], 0)
+            d1 = daily.get(loop_id, {}).get(dates[1], 0)
+            d2 = daily.get(loop_id, {}).get(dates[2], 0)
+            lines.append(f"`{'✅ ' + desc:<16} {age:>8}  {d0:>5} {d1:>5} {d2:>5}`")
+        else:
+            lines.append(f"`{'⚠️ ' + desc:<16} {'없음':>8}  {'-':>5} {'-':>5} {'-':>5}`")
+
+    await _utils.safe_reply(update.message, "\n".join(lines))
+
+
+@admin_only
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """!today — daily summary: top commands, loop status, error count."""
+    now_kst = datetime.now(_KST)
+    today = now_kst.strftime("%Y-%m-%d")
+    now_utc = datetime.now(timezone.utc)
+
+    lines = [f"📊 *오늘 요약* ({today} KST)\n"]
+
+    if _cfg.BBS_DB_PATH.exists():
+        conn = _cfg.get_bbs_db()
+        try:
+            cmd_rows = conn.execute(
+                "SELECT command, COUNT(*) as cnt FROM command_usage"
+                " WHERE date(used_at, '+9 hours') = date('now', '+9 hours')"
+                " GROUP BY command ORDER BY cnt DESC LIMIT 5"
+            ).fetchall()
+            if cmd_rows:
+                total_cmds = sum(r["cnt"] for r in cmd_rows)
+                lines.append(f"🎮 *커맨드* (총 {total_cmds}회)")
+                for r in cmd_rows:
+                    lines.append(f"  `{r['command']:<8}` {r['cnt']}회")
+                lines.append("")
+
+            health_rows = conn.execute(
+                "SELECT loop_id, last_run FROM loop_health"
+            ).fetchall()
+            daily_rows = conn.execute(
+                "SELECT loop_id, run_count FROM loop_health_daily WHERE date = ?", (today,)
+            ).fetchall()
+            daily_map = {r["loop_id"]: r["run_count"] for r in daily_rows}
+
+            ok_loops, warn_loops = [], []
+            for row in health_rows:
+                lid = row["loop_id"]
+                last_dt = ensure_utc(datetime.fromisoformat(row["last_run"]))
+                diff_mins = (now_utc - last_dt).total_seconds() / 60
+                threshold = _cfg.LOOP_ALERT_THRESHOLDS.get(lid, 180)
+                cnt = daily_map.get(lid, 0)
+                label = f"`{lid}` {cnt}회"
+                if diff_mins > threshold:
+                    h, m = int(diff_mins // 60), int(diff_mins % 60)
+                    warn_loops.append(f"  ⚠️ {label} ({h}h{m}m 무응답)")
+                else:
+                    ok_loops.append(f"  ✅ {label}")
+
+            lines.append(f"🔄 *루프* (정상 {len(ok_loops)} / 경고 {len(warn_loops)})")
+            lines.extend(warn_loops)
+            lines.extend(ok_loops)
+            lines.append("")
+        finally:
+            conn.close()
+
+    err_file = _cfg.DISCORD_LOGS_PATH / f"error_{today}.log"
+    if err_file.exists():
+        try:
+            raw = err_file.read_text(encoding="utf-8")
+            err_count = raw.count("[ERROR]")
+            lines.append(f"🚨 *에러* {err_count}건")
+        except Exception:
+            lines.append("🚨 *에러* 로그 읽기 실패")
+    else:
+        lines.append("🚨 *에러* 0건")
+
+    await _utils.safe_reply(update.message, "\n".join(lines))
+
+

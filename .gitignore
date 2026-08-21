@@ -1,0 +1,11 @@
+tg.env
+telegram_archive/archive.env
+telegram_archive/*.session
+telegram_archive/*.session-journal
+telegram_archive/archive.db
+telegram_archive/archive.db-*
+__pycache__/
+*.pyc
+.venv/
+.omc/
+logs/
