@@ -1,6 +1,7 @@
 """Telegram bridge configuration — env loading, paths, constants."""
 
 import logging
+import os
 import random
 import sqlite3
 import time
@@ -67,6 +68,11 @@ def _load_tg_env() -> tuple[str, int, dict]:
             elif "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 extras[k.strip()] = v.strip()
+    # Env-var fallback so tests and CI can import this module without a real
+    # tg.env (a fresh clone has none; the error below used to kill collection).
+    token = token or os.getenv("TG_BOT_TOKEN")
+    if not chat_id and os.getenv("TG_CHAT_ID"):
+        chat_id = int(os.getenv("TG_CHAT_ID"))
     if not token:
         raise RuntimeError("BOT_TOKEN not found in tg.env")
     if not chat_id:
