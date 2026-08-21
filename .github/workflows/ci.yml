@@ -15,7 +15,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
       - name: Install dependencies
-        run: pip install ruff~=0.15 -r requirements.txt
+        run: pip install ruff~=0.15 pytest~=9.0 -r requirements.txt
       - name: Lint (ruff)
         run: ruff check .
       - name: Run tests (pytest)
