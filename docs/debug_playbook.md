@@ -2,8 +2,9 @@
 
 ### P1. 명령어가 다른 핸들러로 잘못 라우팅됨
 
-**원인:** `_CMD_ROUTES`가 `startswith`로 매칭되므로 짧은 prefix가 먼저 등록되면 긴 prefix를 가로챔  
-(과거 사례: `!dmlog` → `!dm`으로 잡히는 패턴 — 짧은 prefix보다 긴 prefix를 위에 등록)
+**원인:** 디스패치는 첫 토큰 exact-match 우선이라 정상 형태는 충돌하지 않음. 붙여쓴 인자형(`!log1`, `!st7d`)만
+순서 기반 `startswith` 폴백을 타는데, 여기서 짧은 prefix가 먼저 등록되면 긴 prefix를 가로챔  
+(과거 사례: `!dmlog` → `!dm`으로 잡히는 패턴 — 짧은 prefix보다 긴 prefix를 위에 등록. 회귀 고정핀: `tests/test_dispatch_auth.py`)
 
 | 단계 | 액션 | 목적 |
 |------|------|------|

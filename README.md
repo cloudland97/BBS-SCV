@@ -13,6 +13,8 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
    CHAT_ID=your_telegram_user_id
    PROJECTS_DISCORD=C:\DEV\BBS
    ```
+   Don't know your `CHAT_ID`? Start the bridge with a placeholder and send
+   `!chatid` to the bot — it replies with your ids (works without auth).
 3. Install dependencies:
    ```
    pip install -r requirements.txt
@@ -48,7 +50,7 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 
 - **Single-user**: Only `CHAT_ID` can interact
 - **Polling-based**: No webhooks or inline keyboards
-- **Shared DB**: Reads `bbs.db` from BBS Discord bot (`BBS_DB_PATH`)
+- **Shared DB**: Reads `bbs.db` from BBS Discord bot (`BBS_DB_PATH`). Runs standalone without it — DB-backed features (news scheduling, stats, loop monitor) skip gracefully until the bot exists
 - **Loop monitor**: Checks Discord bot health every 5min, alerts on downtime
 
 ## Files
@@ -63,6 +65,15 @@ tg.env                Credentials (git-ignored)
 logs/                 Daily log files (git-ignored, auto-cleaned after 30 days)
 tests/                Unit tests
 ```
+
+## Tests
+
+```
+pip install pytest
+pytest -q
+```
+
+No `tg.env` needed — `tests/conftest.py` injects dummy credentials.
 
 ## License
 

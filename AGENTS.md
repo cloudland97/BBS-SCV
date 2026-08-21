@@ -35,7 +35,8 @@ Keep all management commands under the `!` prefix.
 
 원인:
 
-- `_CMD_ROUTES`가 `startswith` 기반이면 짧은 prefix가 긴 prefix를 가로챌 수 있음
+- 디스패치는 첫 토큰 exact-match 우선, 실패 시에만 순서 기반 `startswith` 폴백(붙여쓴 인자형 `!log1` 등).
+  따라서 충돌은 폴백 경로에서만 발생 — 짧은 prefix가 위에 있으면 긴 prefix를 가로챔
 
 Check common conflicts first:
 
