@@ -32,7 +32,6 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 | `!re0` | Restart Telegram bridge |
 | `!hp` | Loop health status |
 | `!log [N]` | Error logs (N=1 for yesterday) |
-| `!today` | Daily summary (top commands, loops, errors) |
 | `!st [userID] [Nd]` | Command usage stats |
 | `!list` | All subscribers by category |
 | `!news content` | Broadcast text via BongBong News (or schedule it if a time is included) |
@@ -43,9 +42,6 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 | `!se [userID] [Nd]` | Subscription event log (default: last 30d, global) |
 | `!dm userID message` | Send Discord DM |
 | `!ud [userID]` | View user DM logs |
-| `!ban userID [min]` | Temp-ban user (default 5min) |
-| `!unban userID` | Remove temp-ban |
-| `!banlist` | Active temp-bans |
 | `!sync` | Write sync flag and restart Discord bot to sync slash commands |
 
 ## Architecture
@@ -62,7 +58,7 @@ telegram_bridge.py    Main bot: polling, handlers, media/news routing
 tg_config.py          Env loading, paths, constants
 tg_utils.py           Formatting helpers, admin_only, safe_reply
 discord_helpers.py    Discord API helpers, username cache, DM, bongnews
-cmd_*.py              !command handlers (discord, moderation, subscribers, news schedule, help)
+cmd_*.py              !command handlers (discord, restart/stats, subscribers, news schedule, help)
 tg.env                Credentials (git-ignored)
 logs/                 Daily log files (git-ignored, auto-cleaned after 30 days)
 tests/                Unit tests

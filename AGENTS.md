@@ -39,7 +39,7 @@ Keep all management commands under the `!` prefix.
 
 Check common conflicts first:
 
-- `!ban` / `!banlist`
+- `!re` / `!re0`
 - `!news` / `!news2`
 
 수정 원칙:

@@ -1,4 +1,4 @@
-"""Commands: Discord bot management (!re, !dm, !ud, !log, !hp, !today)."""
+"""Commands: Discord bot management (!re, !dm, !ud, !log, !hp)."""
 
 import asyncio
 import re
@@ -289,72 +289,3 @@ async def cmd_hp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"`{'⚠️ ' + desc:<16} {'없음':>8}  {'-':>5} {'-':>5} {'-':>5}`")
 
     await _utils.safe_reply(update.message, "\n".join(lines))
-
-
-@admin_only
-async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """!today — daily summary: top commands, loop status, error count."""
-    now_kst = datetime.now(_KST)
-    today = now_kst.strftime("%Y-%m-%d")
-    now_utc = datetime.now(timezone.utc)
-
-    lines = [f"📊 *오늘 요약* ({today} KST)\n"]
-
-    if _cfg.BBS_DB_PATH.exists():
-        conn = _cfg.get_bbs_db()
-        try:
-            cmd_rows = conn.execute(
-                "SELECT command, COUNT(*) as cnt FROM command_usage"
-                " WHERE date(used_at, '+9 hours') = date('now', '+9 hours')"
-                " GROUP BY command ORDER BY cnt DESC LIMIT 5"
-            ).fetchall()
-            if cmd_rows:
-                total_cmds = sum(r["cnt"] for r in cmd_rows)
-                lines.append(f"🎮 *커맨드* (총 {total_cmds}회)")
-                for r in cmd_rows:
-                    lines.append(f"  `{r['command']:<8}` {r['cnt']}회")
-                lines.append("")
-
-            health_rows = conn.execute(
-                "SELECT loop_id, last_run FROM loop_health"
-            ).fetchall()
-            daily_rows = conn.execute(
-                "SELECT loop_id, run_count FROM loop_health_daily WHERE date = ?", (today,)
-            ).fetchall()
-            daily_map = {r["loop_id"]: r["run_count"] for r in daily_rows}
-
-            ok_loops, warn_loops = [], []
-            for row in health_rows:
-                lid = row["loop_id"]
-                last_dt = ensure_utc(datetime.fromisoformat(row["last_run"]))
-                diff_mins = (now_utc - last_dt).total_seconds() / 60
-                threshold = _cfg.LOOP_ALERT_THRESHOLDS.get(lid, 180)
-                cnt = daily_map.get(lid, 0)
-                label = f"`{lid}` {cnt}회"
-                if diff_mins > threshold:
-                    h, m = int(diff_mins // 60), int(diff_mins % 60)
-                    warn_loops.append(f"  ⚠️ {label} ({h}h{m}m 무응답)")
-                else:
-                    ok_loops.append(f"  ✅ {label}")
-
-            lines.append(f"🔄 *루프* (정상 {len(ok_loops)} / 경고 {len(warn_loops)})")
-            lines.extend(warn_loops)
-            lines.extend(ok_loops)
-            lines.append("")
-        finally:
-            conn.close()
-
-    err_file = _cfg.DISCORD_LOGS_PATH / f"error_{today}.log"
-    if err_file.exists():
-        try:
-            raw = err_file.read_text(encoding="utf-8")
-            err_count = raw.count("[ERROR]")
-            lines.append(f"🚨 *에러* {err_count}건")
-        except Exception:
-            lines.append("🚨 *에러* 로그 읽기 실패")
-    else:
-        lines.append("🚨 *에러* 0건")
-
-    await _utils.safe_reply(update.message, "\n".join(lines))
-
-

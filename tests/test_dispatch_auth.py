@@ -3,7 +3,7 @@ handle(), and _dispatch_text routing (exact-token match plus the attached-
 argument prefix fallback), plus parse_schedule_time's branches.
 
 These pin the exact behaviors AGENTS.md's debugging playbook calls out as
-scenario P1 (prefix collision: !ban vs !banlist, !re vs !re0)."""
+scenario P1 (prefix collision: !re vs !re0)."""
 
 import asyncio
 import os
@@ -78,17 +78,13 @@ class TestAuthGate:
 
 
 class TestDispatchRouting:
-    def test_banlist_not_shadowed_by_ban(self, monkeypatch):
-        hit, _ = _route(monkeypatch, "!banlist")
-        assert hit == ["!banlist"]
-
     def test_re0_not_shadowed_by_re(self, monkeypatch):
         hit, _ = _route(monkeypatch, "!re0")
         assert hit == ["!re0"]
 
-    def test_ban_with_args_routes_to_ban(self, monkeypatch):
-        hit, _ = _route(monkeypatch, "!ban 123456789012345678 30")
-        assert hit == ["!ban"]
+    def test_command_with_args_routes_by_first_token(self, monkeypatch):
+        hit, _ = _route(monkeypatch, "!dm 123456789012345678 hello")
+        assert hit == ["!dm"]
 
     def test_attached_argument_falls_back_to_prefix(self, monkeypatch):
         # "!log1" has no space, so exact-token lookup misses and the ordered

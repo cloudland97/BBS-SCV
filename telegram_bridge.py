@@ -290,7 +290,7 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
         return
     # Exact first-token lookup: the command word is matched directly, so a short
     # command can no longer shadow a longer one that shares its prefix
-    # (e.g. "!banlist" is no longer intercepted by "!ban").
+    # (e.g. "!re0" is no longer intercepted by "!re").
     cmd = t.split(maxsplit=1)[0]
     handler = _CMD_TABLE.get(cmd)
     if handler is not None:
@@ -384,14 +384,11 @@ import cmd_subscribers as _cs  # noqa: E402
 import cmd_moderation as _cm  # noqa: E402
 
 # Dispatch table for text commands — longer/more-specific prefixes must come first
-# to prevent shorter prefixes from shadowing them (e.g. "!banlist" before "!ban").
+# to prevent shorter prefixes from shadowing them (e.g. "!re0" before "!re").
 _CMD_ROUTES: list[tuple[str, object]] = [
     ("!re0",     _cm.cmd_restart),
     ("!re",      _cd.cmd_drestart),
     ("!sync",    _cd.cmd_sync),
-    ("!banlist", _cm.cmd_banlist),
-    ("!unban",   _cm.cmd_unban),
-    ("!ban",     _cm.cmd_ban),
     ("!list",    _cs.cmd_list),
     ("!help",    _cc.cmd_help),
     ("!st",      _cm.cmd_stats),
@@ -401,7 +398,6 @@ _CMD_ROUTES: list[tuple[str, object]] = [
     ("!ud",      _cd.cmd_dm_log),
     ("!sub",     _cs.cmd_sub),
     ("!se",      _cs.cmd_sub_events),
-    ("!today",   _cd.cmd_today),
 ]
 
 # Exact-match table built from the ordered routes above. The list is kept as the

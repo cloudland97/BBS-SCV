@@ -11,7 +11,7 @@
 | 2 | `Grep "!<충돌prefix>" telegram_bridge.py -C2` | `_CMD_ROUTES` 내 등록 순서 확인 |
 | 3 | 더 긴 prefix를 더 짧은 prefix 위 줄로 이동 | 긴 prefix가 먼저 매칭되도록 수정 |
 
-**체크리스트:** `!ban`/`!banlist`, `!news`/`!news2`/`!newslist`/`!newscc` 등 같은 시작문자 쌍 전수 확인
+**체크리스트:** `!re`/`!re0`, `!news`/`!news2`/`!newslist`/`!newscc` 등 같은 시작문자 쌍 전수 확인
 
 ---
 
