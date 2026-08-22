@@ -49,6 +49,13 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+# The polling loop asks Telegram for updates every ~10s and httpx logs each
+# request at INFO, which drowns the log: a sample day held 8,428 lines, of
+# which 8,408 were getUpdates. Only their warnings are worth keeping - a real
+# network problem still shows up, and this bridge's own INFO lines stay.
+for _noisy in ("httpx", "httpcore", "telegram.ext.Updater", "telegram.request"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 log = logging.getLogger("telegram_bridge")
 
 
