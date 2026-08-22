@@ -8,7 +8,9 @@ echo Killing existing telegram bridge...
 :: from this folder survived, and two pollers on one token means Telegram rejects
 :: getUpdates with 409 Conflict until one of them dies.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*telegram_bridge.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-timeout /t 2 /nobreak > nul
+:: Start-Sleep, not timeout: timeout.exe aborts immediately when stdin is not
+:: a console, which is how the hidden launcher runs this script.
+powershell -NoProfile -Command "Start-Sleep -Seconds 2"
 
 set PYTHON=%~dp0.venv\Scripts\python.exe
 if not exist "%PYTHON%" set PYTHON=python
