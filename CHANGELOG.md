@@ -4,6 +4,21 @@
 
 ---
 
+### 2026-08-22
+
+- 폴링 소음 억제: httpx가 `getUpdates`를 매 10초 INFO로 찍어 하루 8,428줄 중 8,408줄이 노이즈였음(30일 보관 39MB). httpx/httpcore/PTB updater를 WARNING으로 고정 — 실제 네트워크 장애는 여전히 보임.
+- pytest를 pre-push 훅으로 게이트화 + `scripts/run_tests.py`(venv 자동 탐색). 이 저장소는 pre-commit 설정 자체가 없었고 GitHub Actions는 계정 단위로 차단된 상태라 자동 검증이 0이었음.
+- `!newscc` 취소 경쟁조건 수정: SELECT 후 status 가드 없이 UPDATE해서, 스케줄러가 그 사이 claim하면 **발송 중인 뉴스를 "취소됨"으로 덮어쓰고 운영자에게 취소 성공이라 보고**했음. `claim_for_send`와 같은 원자적 가드 적용, 경쟁 시 실패를 정직하게 통보(회귀 테스트 4건).
+- 유저명 조회 실패가 로그조차 안 남던 침묵 except 수정(`!st`/`!list`/`!ud`/`!se` 표시 영향).
+- `start_bot.bat`의 `timeout` → `Start-Sleep`(stdin이 콘솔이 아니면 timeout.exe가 즉시 실패해 대기가 아예 없었음).
+
+### 2026-08-21
+
+- **MIT 공개 릴리스 (v1.0).** LICENSE 추가, 히스토리 squash 후 force push(개인 1:1 대화 수집기 `telegram_archive` 흔적 제거 목적, 공개 전 수행).
+- `telegram_archive` 패키지 + `!search` 제거 — 브릿지 기능이 아니라 별도 프로젝트로 이관.
+- 수동 밴 3종(`!ban`/`!unban`/`!banlist`)·`!today` 은퇴 — 자동 밴이 이미 텔레그램 알림을 보내고 있어 중복.
+- 독립 클론 대응: `tg.env` 없이도 기동·테스트 가능(env 폴백 + `tests/conftest.py`), `bbs.db` 부재 시 부팅 크래시 수정, CI에 pytest 설치 누락 수정(exit 127로 계속 실패 중이었음).
+
 ### 2026-07-23
 - **버그 수정 (긴 뉴스 발행 실패)**: `!news 내용` 본문이 2000자를 넘으면 `_send_discord_dm`이 `{"content": ...}`를 분할 없이 POST → Discord 400 → 전 구독자 발송 실패("발행 안 됨"). 원인: 텔레그램측 헬퍼에 길이 분할 부재(BBS 본체 `split_message`와 달리). 수면위생 뉴스(본문 2076자 + `**bongnews**` 접두 = 2089자)에서 재현.
   - `_send_discord_dm`에서 `tg_utils.split_message(text, limit=2000)`로 분할 후 순차 전송(중복 헬퍼 신설 대신 기존 검증된 스플리터 재사용). 첫 청크만 미디어 첨부와 함께, 나머지는 후속 텍스트 메시지.
