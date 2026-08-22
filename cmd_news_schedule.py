@@ -44,6 +44,7 @@ def _ensure_table():
         cols = {r[1] for r in conn.execute("PRAGMA table_info(scheduled_news)").fetchall()}
         if "claimed_at" not in cols:
             conn.execute("ALTER TABLE scheduled_news ADD COLUMN claimed_at TEXT")
+
     db_write(_w)
 
 
@@ -200,10 +201,30 @@ def get_stale_sending(older_than_utc: datetime) -> list[dict]:
         conn.close()
 
 
+def set_status_if_pending(news_id: int, status: str) -> bool:
+    """Flip a still-pending row to *status*. Returns True iff this call won.
+
+    Same guard as claim_for_send: without `WHERE status = 'pending'`, a cancel
+    (or boot-time expiry) issued while the scheduler is mid-broadcast would
+    stomp the row's real state, so !newscc could report "cancelled" for news
+    that actually went out.
+    """
+
+    def _w(conn):
+        cur = conn.execute(
+            "UPDATE scheduled_news SET status = ? WHERE id = ? AND status = 'pending'",
+            (status, news_id),
+        )
+        return cur.rowcount == 1
+
+    return db_write(_w)
+
+
 def mark_status(news_id: int, status: str):
     # Idempotent status UPDATE — safe to retry on SQLITE_BUSY/locked via db_write.
     def _w(conn):
         conn.execute("UPDATE scheduled_news SET status = ? WHERE id = ?", (status, news_id))
+
     db_write(_w)
 
 
@@ -228,7 +249,7 @@ async def cmd_newslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_newscc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!newscc <id> — cancel a scheduled news item."""
     text = (update.message.text or "").strip()
-    arg = text[len("!newscc"):].strip()
+    arg = text[len("!newscc") :].strip()
     if not arg or not arg.isdigit():
         await update.message.reply_text(
             "Usage: `!newscc <ID>`\n목록 확인: `!newslist`", parse_mode="Markdown"
@@ -246,17 +267,17 @@ async def cmd_newscc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not row:
         await update.message.reply_text(f"ID {news_id} 예약 없음 (이미 발송됐거나 취소됨).")
         return
-    # Idempotent status UPDATE — safe to retry on SQLITE_BUSY/locked via db_write.
-    def _w(conn):
-        conn.execute("UPDATE scheduled_news SET status = 'cancelled' WHERE id = ?", (news_id,))
-    db_write(_w)
+    if not set_status_if_pending(news_id, "cancelled"):
+        # The scheduler claimed it between the SELECT above and this UPDATE.
+        await update.message.reply_text(
+            f"⚠️ ID {news_id} 는 방금 발송이 시작돼 취소하지 못했습니다."
+        )
+        return
 
     dt_utc = ensure_utc(datetime.fromisoformat(row["scheduled_at"]))
     dt_kst = dt_utc.astimezone(KST)
     preview = row["content"][:40]
     await update.message.reply_text(
-        f"✅ 예약 취소됨 `[{news_id}]`\n"
-        f"📅 {dt_kst.strftime('%m/%d %H:%M')} KST\n"
-        f"📝 {preview}",
+        f"✅ 예약 취소됨 `[{news_id}]`\n📅 {dt_kst.strftime('%m/%d %H:%M')} KST\n📝 {preview}",
         parse_mode="Markdown",
     )

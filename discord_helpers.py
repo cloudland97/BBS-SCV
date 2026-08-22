@@ -72,8 +72,11 @@ async def _fetch_discord_usernames(uids: list[str]) -> dict[str, str]:
                 if r.status == 200:
                     data = await r.json()
                     return uid, data.get("global_name") or data.get("username") or uid
-        except Exception:
-            pass
+        except Exception as e:
+            # The caller falls back to showing the raw id, so a failure here is
+            # cosmetic - but silence made auth/rate-limit errors indistinguishable
+            # from "user not found" in !st / !list / !ud / !se output.
+            log.debug(f"username fetch failed for {uid}: {e}")
         return uid, uid
 
     async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as session:
@@ -105,7 +108,11 @@ _DISCORD_CONTENT_LIMIT = 2000
 
 
 async def _send_discord_dm(
-    session, token, user_id, text, file_bytes: Optional[bytes] = None,
+    session,
+    token,
+    user_id,
+    text,
+    file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
 ):
     headers = {"Authorization": f"Bot {token}"}
@@ -160,7 +167,9 @@ async def _send_discord_dm(
 
 
 async def _broadcast_bbnews(
-    update: Update, content: str, file_bytes: Optional[bytes] = None,
+    update: Update,
+    content: str,
+    file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
 ):
     token = _get_discord_token()
@@ -179,9 +188,7 @@ async def _broadcast_bbnews(
     except Exception as e:
         log.warning(f"Failed to save bongnews latest: {e}")
 
-    status_msg = await update.message.reply_text(
-        f"Sending to {len(subscribers)} subscribers.."
-    )
+    status_msg = await update.message.reply_text(f"Sending to {len(subscribers)} subscribers..")
     msg_text = f"**bongnews**\n\n{content}"
 
     async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as session:
@@ -203,13 +210,18 @@ async def _broadcast_bbnews(
 
 
 async def _broadcast_bbnews_auto(
-    bot, chat_id: int, content: str, file_bytes: Optional[bytes] = None,
+    bot,
+    chat_id: int,
+    content: str,
+    file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
 ):
     """Broadcast bongnews without an Update object (scheduled/automated sends)."""
     token = _get_discord_token()
     if not token:
-        await bot.send_message(chat_id=chat_id, text="❌ 예약 뉴스 발송 실패: Discord token not found.")
+        await bot.send_message(
+            chat_id=chat_id, text="❌ 예약 뉴스 발송 실패: Discord token not found."
+        )
         return
     subscribers = _get_bongnews_subscribers()
     if not subscribers:

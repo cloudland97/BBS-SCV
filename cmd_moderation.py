@@ -37,8 +37,7 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         subprocess.Popen(
             ["cmd", "/c", "start", "", "/min", str(bat)],
             cwd=str(bat.parent),
-            creationflags=subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         # The spawned bat kills this process within ~2s; exit is handled there.
 
@@ -50,7 +49,7 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!st [userID] — command usage stats from SQLite. No arg = summary, with arg = user detail."""
     text = (update.message.text or "").strip()
-    raw_arg = text[len("!st"):].strip()
+    raw_arg = text[len("!st") :].strip()
 
     period_match = re.search(r"(\d+)d", raw_arg)
     days_filter = int(period_match.group(1)) if period_match else None
@@ -75,9 +74,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uid = int(arg)
             rows = conn.execute(
                 "SELECT command, COUNT(*) as cnt FROM command_usage"
-                " WHERE user_id = ?"
-                + time_clause
-                + " GROUP BY command ORDER BY cnt DESC",
+                " WHERE user_id = ?" + time_clause + " GROUP BY command ORDER BY cnt DESC",
                 (uid, *time_params),
             ).fetchall()
             if not rows:
@@ -107,9 +104,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 uid_str = str(r["user_id"])
                 user_data.setdefault(uid_str, []).append((r["command"], r["cnt"]))
 
-            user_totals = {
-                uid: sum(c for _, c in cmds) for uid, cmds in user_data.items()
-            }
+            user_totals = {uid: sum(c for _, c in cmds) for uid, cmds in user_data.items()}
             sorted_uids = sorted(user_data, key=lambda u: user_totals[u], reverse=True)
 
             names = await _dh._fetch_discord_usernames(sorted_uids)

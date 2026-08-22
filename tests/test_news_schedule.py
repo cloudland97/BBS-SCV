@@ -128,7 +128,9 @@ class TestStaleSending:
 
         tg_config.db_write(_w)
 
-        stale_ids = {r["id"] for r in cns.get_stale_sending(datetime.now(UTC) - timedelta(minutes=5))}
+        stale_ids = {
+            r["id"] for r in cns.get_stale_sending(datetime.now(UTC) - timedelta(minutes=5))
+        }
         assert nid_old in stale_ids
         assert nid_new not in stale_ids
 
@@ -136,3 +138,43 @@ class TestStaleSending:
         nid = _insert()  # pending, never claimed
         stale = cns.get_stale_sending(datetime.now(UTC) + timedelta(minutes=5))
         assert nid not in {r["id"] for r in stale}
+
+
+class TestCancelVsSendRace:
+    """!newscc must not stomp a row the scheduler already claimed.
+
+    Before 2026-08-22 the cancel UPDATE had no status guard, so a cancel issued
+    during a broadcast flipped a 'sending' row to 'cancelled' - the operator was
+    told the news was cancelled while it was going out.
+    """
+
+    def test_cancel_wins_while_pending(self, temp_db):
+        news_id = _insert()
+        assert cns.set_status_if_pending(news_id, "cancelled") is True
+        # A claim afterwards must lose: the row is no longer pending.
+        assert cns.claim_for_send(news_id) is False
+
+    def test_cancel_loses_after_claim(self, temp_db):
+        news_id = _insert()
+        assert cns.claim_for_send(news_id) is True
+        assert cns.set_status_if_pending(news_id, "cancelled") is False
+
+        conn = tg_config.get_bbs_db()
+        try:
+            status = conn.execute(
+                "SELECT status FROM scheduled_news WHERE id = ?", (news_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert status == "sending"  # real state preserved, not stomped
+
+    def test_expire_guard_also_atomic(self, temp_db):
+        news_id = _insert()
+        assert cns.claim_for_send(news_id) is True
+        # Boot-time expiry of an already-claimed row must be a no-op.
+        assert cns.set_status_if_pending(news_id, "expired") is False
+
+    def test_double_cancel_is_idempotent_and_reports_second_as_lost(self, temp_db):
+        news_id = _insert()
+        assert cns.set_status_if_pending(news_id, "cancelled") is True
+        assert cns.set_status_if_pending(news_id, "cancelled") is False

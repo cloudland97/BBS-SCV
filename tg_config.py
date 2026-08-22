@@ -191,7 +191,11 @@ def db_write(fn, max_attempts=5, base_sleep=0.05, max_total=8.0):
             return result
         except sqlite3.OperationalError as e:
             conn.rollback()
-            if (not _is_lock_error(e)) or attempt >= max_attempts or (time.monotonic() - start) >= max_total:
+            if (
+                (not _is_lock_error(e))
+                or attempt >= max_attempts
+                or (time.monotonic() - start) >= max_total
+            ):
                 raise
             sleep = min(base_sleep * (2 ** (attempt - 1)), 1.0)
             time.sleep(sleep + random.uniform(0, base_sleep))
@@ -201,28 +205,36 @@ def db_write(fn, max_attempts=5, base_sleep=0.05, max_total=8.0):
 
 # Slash commands to track for !st
 TRACKED_COMMANDS = [
-    "bbtt", "bbf1", "bbmk", "bbark", "bbup",
-    "bbs", "bbday", "bbfb", "bbpf", "bbbg",
+    "bbtt",
+    "bbf1",
+    "bbmk",
+    "bbark",
+    "bbup",
+    "bbs",
+    "bbday",
+    "bbfb",
+    "bbpf",
+    "bbbg",
 ]
 
 # Loop monitor thresholds (minutes)
 LOOP_ALERT_THRESHOLDS = {
-    "market_loop":     120,
-    "danawa_loop":     180,
-    "morning_loop":    180,
-    "feed_loop":        60,
+    "market_loop": 120,
+    "danawa_loop": 180,
+    "morning_loop": 180,
+    "feed_loop": 60,
     "pubg_daily_loop": 1440,
     "live_score_loop": 360,
-    "notify_loop":     360,
-    "lineup_loop":     360,
-    "result_loop":     360,
+    "notify_loop": 360,
+    "lineup_loop": 360,
+    "result_loop": 360,
     "f1_standings_loop": 120,
-    "f1_result_loop":    120,
-    "rate_alert_loop":   1440,
+    "f1_result_loop": 120,
+    "rate_alert_loop": 1440,
     # ark_loop fires once a day at 20:00 KST, so last_run is always up to 24h old.
     # With no entry here it fell to the 180-minute default and reported "no
     # response" for most of every day. 26h leaves headroom for a restart.
-    "ark_loop":          1560,
+    "ark_loop": 1560,
     # etf_holdings_loop is likewise once-daily (22:00 KST); same 26h reasoning.
     "etf_holdings_loop": 1560,
 }

@@ -54,11 +54,13 @@ def _to_kst(iso: str) -> str:
 
 def admin_only(func):
     """Decorator: reject non-admin users silently."""
+
     @wraps(func)
     async def wrapper(update, context):
         if update.effective_user.id != ALLOWED_USER_ID:
             return
         return await func(update, context)
+
     return wrapper
 
 

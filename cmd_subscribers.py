@@ -1,4 +1,4 @@
-"""Commands: subscriber management (!list, !sub, !fb, !se)."""
+"""Commands: subscriber management (!list, !sub, !se)."""
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -100,7 +100,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!sub [list|add <id>|del <id>] — manage bongnews subscribers."""
     text = (update.message.text or "").strip()
-    arg = text[len("!sub"):].strip()
+    arg = text[len("!sub") :].strip()
     parts = arg.split()
 
     if not _cfg.BBS_DB_PATH.exists():
@@ -122,6 +122,7 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "INSERT OR IGNORE INTO bongnews_subscribers (user_id) VALUES (?)", (uid,)
                 )
                 return conn.execute("SELECT changes()").fetchone()[0]
+
             affected = _cfg.db_write(_w)
         except Exception as e:
             await update.message.reply_text(f"❌ 구독 추가 실패: {e}")
@@ -129,9 +130,13 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         names = await _dh._fetch_discord_usernames([str(uid)])
         name = names.get(str(uid), str(uid))
         if affected:
-            await update.message.reply_text(f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 추가", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 추가", parse_mode="Markdown"
+            )
         else:
-            await update.message.reply_text(f"ℹ️ *{name}* (`{uid}`) 이미 구독 중", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"ℹ️ *{name}* (`{uid}`) 이미 구독 중", parse_mode="Markdown"
+            )
 
     elif subcmd == "del":
         if len(parts) < 2 or not parts[1].isdigit():
@@ -143,6 +148,7 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             def _w(conn):
                 cur = conn.execute("DELETE FROM bongnews_subscribers WHERE user_id = ?", (uid,))
                 return cur.rowcount > 0
+
             deleted = _cfg.db_write(_w)
         except Exception as e:
             await update.message.reply_text(f"❌ 구독 삭제 실패: {e}")
@@ -150,9 +156,13 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         names = await _dh._fetch_discord_usernames([str(uid)])
         name = names.get(str(uid), str(uid))
         if deleted:
-            await update.message.reply_text(f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 삭제", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 삭제", parse_mode="Markdown"
+            )
         else:
-            await update.message.reply_text(f"ℹ️ *{name}* (`{uid}`) 구독자 아님", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"ℹ️ *{name}* (`{uid}`) 구독자 아님", parse_mode="Markdown"
+            )
 
     else:
         await update.message.reply_text(
@@ -161,13 +171,13 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-
 @admin_only
 async def cmd_sub_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!se [userID] [Nd] — subscription event log. Default: last 30d global."""
     import re as _re
+
     text = (update.message.text or "").strip()
-    arg = text[len("!se"):].strip()
+    arg = text[len("!se") :].strip()
     parts = arg.split()
 
     days = 30

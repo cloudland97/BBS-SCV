@@ -113,7 +113,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!dm <userID> <message> — send a Discord DM to a specific user."""
     text = (update.message.text or "").strip()
-    rest = text[len("!dm"):].strip()
+    rest = text[len("!dm") :].strip()
     parts = rest.split(" ", 1)
     if len(parts) < 2 or not parts[0].isdigit():
         await update.message.reply_text(
@@ -134,19 +134,13 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             ok = await _dh._send_discord_dm(session, token, user_id, message)
         if ok:
-            await update.message.reply_text(
-                f"✅ DM 발송 완료 → `{user_id}`", parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"✅ DM 발송 완료 → `{user_id}`", parse_mode="Markdown")
             _cfg.log.info(f"DM sent to {user_id}")
         else:
-            await update.message.reply_text(
-                f"❌ DM 발송 실패 → `{user_id}`", parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"❌ DM 발송 실패 → `{user_id}`", parse_mode="Markdown")
             _cfg.log.warning(f"DM failed to {user_id}")
     except Exception as e:
         await update.message.reply_text(f"❌ 오류: {e}")
@@ -162,7 +156,7 @@ async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = (update.message.text or "").strip()
-    arg = text[len("!ud"):].strip()
+    arg = text[len("!ud") :].strip()
 
     try:
         if arg and arg.isdigit():
@@ -208,7 +202,7 @@ async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!log [N] — Show Discord bot error log. N = days ago (default 0 = today)."""
     text = (update.message.text or "").strip()
-    arg = text[len("!log"):].strip()
+    arg = text[len("!log") :].strip()
 
     m = re.match(r"^(\d+)d?$", arg)
     days_ago = int(m.group(1)) if m else 0
@@ -252,9 +246,7 @@ async def cmd_hp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         health = {
             r["loop_id"]: r
-            for r in conn.execute(
-                "SELECT loop_id, last_run FROM loop_health"
-            ).fetchall()
+            for r in conn.execute("SELECT loop_id, last_run FROM loop_health").fetchall()
         }
         daily_rows = conn.execute(
             "SELECT loop_id, date, run_count FROM loop_health_daily WHERE date IN (?,?,?)",

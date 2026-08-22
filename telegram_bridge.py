@@ -77,9 +77,7 @@ async def _loop_monitor_task(app):
 
             if alerts:
                 msg = "Loop down detected\n\n" + "\n".join(alerts)
-                await app.bot.send_message(
-                    chat_id=ALLOWED_USER_ID, text=msg, parse_mode="Markdown"
-                )
+                await app.bot.send_message(chat_id=ALLOWED_USER_ID, text=msg, parse_mode="Markdown")
                 log.warning(f"Loop alert: {alerts}")
         except Exception as e:
             log.error(f"Loop monitor error: {e}")
@@ -102,11 +100,21 @@ async def _check_boot_scheduled_news(app):
     # A human decides whether they actually went out; we only surface them.
     stale = _cns.get_stale_sending(now_utc - timedelta(minutes=5))
     if stale:
-        lines = [f"⚠️ 발송 중(sending) 상태로 멈춘 예약 뉴스 {len(stale)}건 — 발송 여부 수동 확인 필요:"]
+        lines = [
+            f"⚠️ 발송 중(sending) 상태로 멈춘 예약 뉴스 {len(stale)}건 — 발송 여부 수동 확인 필요:"
+        ]
         for item in stale:
-            claimed_kst = datetime.fromisoformat(item["claimed_at"]).replace(tzinfo=timezone.utc).astimezone(KST)
-            lines.append(f"• `[{item['id']}]` {claimed_kst.strftime('%m/%d %H:%M')} claimed — {item['content'][:30]}...")
-        await app.bot.send_message(chat_id=ALLOWED_USER_ID, text="\n".join(lines), parse_mode="Markdown")
+            claimed_kst = (
+                datetime.fromisoformat(item["claimed_at"])
+                .replace(tzinfo=timezone.utc)
+                .astimezone(KST)
+            )
+            lines.append(
+                f"• `[{item['id']}]` {claimed_kst.strftime('%m/%d %H:%M')} claimed — {item['content'][:30]}..."
+            )
+        await app.bot.send_message(
+            chat_id=ALLOWED_USER_ID, text="\n".join(lines), parse_mode="Markdown"
+        )
 
     cutoff = now_utc - timedelta(minutes=15)
     due = _cns.get_due(now_utc)
@@ -121,10 +129,18 @@ async def _check_boot_scheduled_news(app):
     if expired:
         lines = [f"⚠️ 봇 다운 중 만료된 예약 뉴스 {len(expired)}건:"]
         for item in expired:
-            dt_kst = datetime.fromisoformat(item["scheduled_at"]).replace(tzinfo=timezone.utc).astimezone(KST)
-            lines.append(f"• `[{item['id']}]` {dt_kst.strftime('%m/%d %H:%M')} — {item['content'][:30]}...")
-            _cns.mark_status(item["id"], "expired")
-        await app.bot.send_message(chat_id=ALLOWED_USER_ID, text="\n".join(lines), parse_mode="Markdown")
+            dt_kst = (
+                datetime.fromisoformat(item["scheduled_at"])
+                .replace(tzinfo=timezone.utc)
+                .astimezone(KST)
+            )
+            lines.append(
+                f"• `[{item['id']}]` {dt_kst.strftime('%m/%d %H:%M')} — {item['content'][:30]}..."
+            )
+            _cns.set_status_if_pending(item["id"], "expired")
+        await app.bot.send_message(
+            chat_id=ALLOWED_USER_ID, text="\n".join(lines), parse_mode="Markdown"
+        )
 
     for item in send_now:
         # Same claim-before-send guard as the 30s loop (the scheduler task also
@@ -178,9 +194,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if caption.startswith("!news2"):
         await _handle_news_media(update, context, caption, update.message.photo[-1])
         return
-    await update.message.reply_text(
-        "Use `!news2 content` caption to broadcast photo via bongnews."
-    )
+    await update.message.reply_text("Use `!news2 content` caption to broadcast photo via bongnews.")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,9 +212,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if caption.startswith("!news2"):
         await _handle_news_media(update, context, caption, update.message.video)
         return
-    await update.message.reply_text(
-        "Use `!news2 content` caption to broadcast video via bongnews."
-    )
+    await update.message.reply_text("Use `!news2 content` caption to broadcast video via bongnews.")
 
 
 # -- Bongnews commands --
@@ -211,9 +223,7 @@ async def cmd_bbnews_text(update: Update, content: str):
     content = content.replace("\\n", "\n")
     if not content:
         await update.message.reply_text(
-            "Usage:\n"
-            "• `!news content` — text only\n"
-            "• `!news2 content` — with media",
+            "Usage:\n• `!news content` — text only\n• `!news2 content` — with media",
             parse_mode="Markdown",
         )
         return
@@ -263,10 +273,10 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
         await _cns.cmd_newscc(update, context)
         return
     if t.startswith("!news2"):
-        await cmd_bbnews_text(update, t[len("!news2"):].strip())
+        await cmd_bbnews_text(update, t[len("!news2") :].strip())
         return
     if t.startswith("!news"):
-        raw = t[len("!news"):].strip()
+        raw = t[len("!news") :].strip()
         try:
             scheduled_at, content = _cns.parse_schedule_time(raw)
             if not content:
@@ -312,7 +322,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t == "!chatid":
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
-        await update.message.reply_text(f"chat_id: `{chat_id}`\nuser_id: `{user_id}`", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"chat_id: `{chat_id}`\nuser_id: `{user_id}`", parse_mode="Markdown"
+        )
         return
     if update.effective_user.id != ALLOWED_USER_ID:
         await update.message.reply_text("No permission")
@@ -386,18 +398,18 @@ import cmd_moderation as _cm  # noqa: E402
 # Dispatch table for text commands — longer/more-specific prefixes must come first
 # to prevent shorter prefixes from shadowing them (e.g. "!re0" before "!re").
 _CMD_ROUTES: list[tuple[str, object]] = [
-    ("!re0",     _cm.cmd_restart),
-    ("!re",      _cd.cmd_drestart),
-    ("!sync",    _cd.cmd_sync),
-    ("!list",    _cs.cmd_list),
-    ("!help",    _cc.cmd_help),
-    ("!st",      _cm.cmd_stats),
-    ("!dm",      _cd.cmd_dm),
-    ("!hp",      _cd.cmd_hp),
-    ("!log",     _cd.cmd_log),
-    ("!ud",      _cd.cmd_dm_log),
-    ("!sub",     _cs.cmd_sub),
-    ("!se",      _cs.cmd_sub_events),
+    ("!re0", _cm.cmd_restart),
+    ("!re", _cd.cmd_drestart),
+    ("!sync", _cd.cmd_sync),
+    ("!list", _cs.cmd_list),
+    ("!help", _cc.cmd_help),
+    ("!st", _cm.cmd_stats),
+    ("!dm", _cd.cmd_dm),
+    ("!hp", _cd.cmd_hp),
+    ("!log", _cd.cmd_log),
+    ("!ud", _cd.cmd_dm_log),
+    ("!sub", _cs.cmd_sub),
+    ("!se", _cs.cmd_sub_events),
 ]
 
 # Exact-match table built from the ordered routes above. The list is kept as the
@@ -439,15 +451,13 @@ app.add_error_handler(_on_error)
 app.add_handler(CommandHandler("help", _cmd_help_entry))
 app.add_handler(
     MessageHandler(
-        filters.TEXT & ~filters.COMMAND
-        | filters.PHOTO
-        | filters.VIDEO
-        | filters.Document.ALL,
+        filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
         handle,
     )
 )
 if __name__ == "__main__":
     import sys
+
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     print("telegram bridge running...")
