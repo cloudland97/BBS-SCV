@@ -390,7 +390,7 @@ async def post_init(application):
     log.info("Telegram bridge starting")
 
 
-import cmd_claude as _cc  # noqa: E402
+import cmd_help as _cc  # noqa: E402
 import cmd_discord as _cd  # noqa: E402
 import cmd_subscribers as _cs  # noqa: E402
 import cmd_moderation as _cm  # noqa: E402
