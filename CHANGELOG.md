@@ -4,6 +4,16 @@
 
 ---
 
+### 2026-09-06
+
+- **전수조사 2차(BBS `docs/audit-findings-2026-09-06.md`) 후속 조치.**
+- 브릿지 단일 인스턴스 락(`logs/bridge.pid`) 추가 — `!re0` 연타나 `start_bot.bat` 중복 기동 시 브릿지가 2개 뜨는 경쟁 상태 방지(R4). 죽은/깨진 pid 파일은 기동을 막지 않음.
+- 토큰 로그 유출 방지: 텔레그램 봇 토큰 패턴(`bot<id>:<secret>`)을 로그 레코드에서 걸러내는 리댁션 필터 추가 — 과거 httpx가 요청 URL을 INFO로 찍어 로그 20개 파일에 토큰이 평문 노출된 사고(N1) 재발 방지.
+- 일일 유지보수 태스크 추가 — 로그 정리(`_cleanup_old_logs`)가 기존엔 `post_init` 1회뿐이라 장기 구동 시 정리가 멈췄음. 하루 1회 heartbeat 로그도 함께 추가(장시간 무로그 상태와 죽은 프로세스를 구분 못 하던 문제, N14/R11).
+- `!newscc <ID> force` 추가 — 크래시로 `sending`에 고착된 행을 수동으로 `cancelled`로 되돌리는 탈출구.
+- `!log`가 읽는 BBS 에러 로그 경로를 실제 파일명(`error.log`, `error.log.YYYY-MM-DD`)에 맞게 수정 — 기존 `error_<date>.log` 추정이 매번 빗나가 "No error log"만 반환했음(N4).
+- `!re` 대상 프로세스 매칭에 `BBS_RESTART_ROOT` 환경변수를 명시적으로 넘기도록 정리 — `bbs-web`/`claxx` 등 형제 프로젝트 오탐 방지.
+
 ### 2026-08-22
 
 - 폴링 소음 억제: httpx가 `getUpdates`를 매 10초 INFO로 찍어 하루 8,428줄 중 8,408줄이 노이즈였음(30일 보관 39MB). httpx/httpcore/PTB updater를 WARNING으로 고정 — 실제 네트워크 장애는 여전히 보임.

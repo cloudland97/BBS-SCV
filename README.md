@@ -40,6 +40,7 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 | `!news2 content` | Broadcast with media (attach image/video) |
 | `!newslist` | Show pending scheduled news |
 | `!newscc <ID>` | Cancel a scheduled news item |
+| `!newscc <ID> force` | Force-release a row stuck in `sending` (e.g. after a crash mid-broadcast) back to `cancelled` |
 | `!sub [list\|add\|del] [ID]` | Manage news subscribers |
 | `!se [userID] [Nd]` | Subscription event log (default: last 30d, global) |
 | `!dm userID message` | Send Discord DM |
@@ -52,6 +53,12 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 - **Polling-based**: No webhooks or inline keyboards
 - **Shared DB**: Reads `bbs.db` from BBS Discord bot (`BBS_DB_PATH`). Runs standalone without it — DB-backed features (news scheduling, stats, loop monitor) skip gracefully until the bot exists
 - **Loop monitor**: Checks Discord bot health every 5min, alerts on downtime
+- **Single instance**: claims `logs/bridge.pid` on startup; a second instance exits instead of racing the first (a stale/dead pid file never blocks startup)
+- **Daily maintenance**: log retention (`_cleanup_old_logs`, 30 days) and a heartbeat log line run once a day in-process, not just at `post_init` — otherwise a bridge that stays up for weeks never prunes, and a healthy-but-quiet bridge is indistinguishable from a dead one in the logs
+- **Token redaction**: a logging filter strips any Telegram bot token (`bot<id>:<secret>` pattern) from log records before they're written, regardless of which library emitted the line
+- **`!log`** reads the BBS bot's own logs — `logs/error.log` for today, `logs/error.log.YYYY-MM-DD` for older days
+- **`!re` restart** targets processes under the `BBS_RESTART_ROOT` env var (set to the BBS Discord bot path before the kill command runs), so it never touches sibling checkouts like `bbs-web` or `claxx`
+- **Scheduled news status**: `pending` → `sending` → `sent` / `failed` (or `cancelled`). `failed` means the broadcast ran but delivered to nobody (0 successful sends)
 
 ## Files
 
