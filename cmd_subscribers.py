@@ -1,6 +1,7 @@
 """Commands: subscriber management (!list, !sub, !se)."""
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from telegram import Update
@@ -9,19 +10,18 @@ from telegram.ext import ContextTypes
 import tg_config as _cfg
 import tg_utils as _utils
 import discord_helpers as _dh
-from tg_utils import admin_only, _to_kst
+from tg_utils import admin_only, _to_kst, md_escape, parse_user_id
 
 
 @admin_only
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!list — subscriber list per category from SQLite."""
-    conn = _cfg.open_db()
-    if conn is None:
+    if not _cfg.BBS_DB_PATH.exists():
         await update.message.reply_text("DB not found.")
         return
     all_uids: set[str] = set()
 
-    try:
+    def _read(conn):
         _ALLOWED_TABLES = {
             "bongnews_subscribers",
             "subscribers",
@@ -40,15 +40,19 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError(f"Column not allowed: {set(cols) - _ALLOWED_COLS}")
             return conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
 
-        bongnews = _rows("bongnews_subscribers", "user_id")
-        spurs = _rows("subscribers", "user_id", "mode")
-        market = _rows("market_subscribers", "user_id", "mode")
-        ark = _rows("ark_subscribers", "user_id")
-        morning = _rows("morning_subscribers", "user_id", "cities")
-        danawa = _rows("danawa_subscriptions", "user_id", "name")
-        pubg = _rows("pubg_subscribers", "user_id", "nickname")
-    finally:
-        conn.close()
+        return (
+            _rows("bongnews_subscribers", "user_id"),
+            _rows("subscribers", "user_id", "mode"),
+            _rows("market_subscribers", "user_id", "mode"),
+            _rows("ark_subscribers", "user_id"),
+            _rows("morning_subscribers", "user_id", "cities"),
+            _rows("danawa_subscriptions", "user_id", "name"),
+            _rows("pubg_subscribers", "user_id", "nickname"),
+        )
+
+    # Seven queries against the shared bbs.db; off the event loop so a BBS-side
+    # write lock cannot stall Telegram polling.
+    bongnews, spurs, market, ark, morning, danawa, pubg = await _cfg.db_read_async(_read)
 
     for rows in (bongnews, spurs, market, ark, morning, pubg):
         all_uids.update(str(r["user_id"]) for r in rows)
@@ -57,7 +61,9 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = await _dh._fetch_discord_usernames(list(all_uids))
 
     def _n(uid) -> str:
-        return names.get(str(uid), str(uid))
+        # Escaped here, not at each call site: a Discord global_name holding an
+        # underscore used to turn the whole !list message into a BadRequest.
+        return md_escape(names.get(str(uid), str(uid)))
 
     lines = ["📋 *구독자 목록*\n"]
 
@@ -80,20 +86,44 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             city_str = ", ".join(city_list) if city_list else "—"
         except Exception:
             city_str = str(r["cities"])
+        city_str = md_escape(city_str)
         lines.append(f"  · {_n(r['user_id'])} — {city_str}")
     lines.append("")
 
     danawa_uids = sorted({r["user_id"] for r in danawa})
     lines.append(f"*다나와* ({len(danawa_uids)}명)")
     for uid in danawa_uids:
-        items = ", ".join(r["name"] for r in danawa if r["user_id"] == uid)
+        items = md_escape(", ".join(r["name"] for r in danawa if r["user_id"] == uid))
         lines.append(f"  · {_n(uid)} — {items}")
     lines.append("")
 
-    _section("PUBG", pubg, lambda uid, rs: f"  · {_n(uid)} `{rs[0]['nickname']}`")
+    _section(
+        "PUBG", pubg, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['nickname'] for r in rs)}`"
+    )
 
     lines.append(f"전체 이용자: {len(all_uids)}명")
     await _utils.safe_reply(update.message, "\n".join(lines))
+
+
+def _record_event(conn, uid: int, action: str) -> None:
+    """Write the subscription_events audit row for a membership change.
+
+    Same transaction as the change itself, so the two cannot disagree - only the
+    Discord bot used to write these rows, which left anything done from here
+    invisible to !se and to BBS-side retention stats.
+
+    Best-effort on purpose: the membership change is what the operator asked
+    for. A drifted or missing subscription_events table (this is the BBS bot's
+    schema, not ours) must cost an audit row, not the subscription. sqlite rolls
+    back only the failed statement, so the surrounding transaction still commits.
+    """
+    try:
+        conn.execute(
+            "INSERT INTO subscription_events (user_id, source, action) VALUES (?, 'bongnews', ?)",
+            (uid, action),
+        )
+    except sqlite3.Error as e:
+        _cfg.log.warning("subscription_events %s row for %s failed: %s", action, uid, e)
 
 
 @admin_only
@@ -110,10 +140,10 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subcmd = parts[0].lower() if parts else "list"
 
     if subcmd == "add":
-        if len(parts) < 2 or not parts[1].isdigit():
+        uid = parse_user_id(parts[1]) if len(parts) > 1 else None
+        if uid is None:
             await update.message.reply_text("사용법: `!sub add <userID>`", parse_mode="Markdown")
             return
-        uid = int(parts[1])
         try:
             # Idempotent INSERT OR IGNORE — safe to retry on SQLITE_BUSY/locked.
             # SELECT changes() must read on the same connection inside the fn.
@@ -121,47 +151,53 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.execute(
                     "INSERT OR IGNORE INTO bongnews_subscribers (user_id) VALUES (?)", (uid,)
                 )
-                return conn.execute("SELECT changes()").fetchone()[0]
+                affected = conn.execute("SELECT changes()").fetchone()[0]
+                if affected:
+                    _record_event(conn, uid, "subscribe")
+                return affected
 
-            affected = _cfg.db_write(_w)
+            affected = await _cfg.db_write_async(_w)
         except Exception as e:
             await update.message.reply_text(f"❌ 구독 추가 실패: {e}")
             return
         names = await _dh._fetch_discord_usernames([str(uid)])
-        name = names.get(str(uid), str(uid))
+        name = md_escape(names.get(str(uid), str(uid)))
         if affected:
-            await update.message.reply_text(
-                f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 추가", parse_mode="Markdown"
+            await _utils.safe_reply(
+                update.message, f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 추가", parse_mode="Markdown"
             )
         else:
-            await update.message.reply_text(
-                f"ℹ️ *{name}* (`{uid}`) 이미 구독 중", parse_mode="Markdown"
+            await _utils.safe_reply(
+                update.message, f"ℹ️ *{name}* (`{uid}`) 이미 구독 중", parse_mode="Markdown"
             )
 
     elif subcmd == "del":
-        if len(parts) < 2 or not parts[1].isdigit():
+        uid = parse_user_id(parts[1]) if len(parts) > 1 else None
+        if uid is None:
             await update.message.reply_text("사용법: `!sub del <userID>`", parse_mode="Markdown")
             return
-        uid = int(parts[1])
         try:
             # Idempotent DELETE — safe to retry on SQLITE_BUSY/locked via db_write.
             def _w(conn):
                 cur = conn.execute("DELETE FROM bongnews_subscribers WHERE user_id = ?", (uid,))
-                return cur.rowcount > 0
+                removed = cur.rowcount > 0
+                if removed:
+                    _record_event(conn, uid, "unsubscribe")
+                return removed
 
-            deleted = _cfg.db_write(_w)
+            deleted = await _cfg.db_write_async(_w)
         except Exception as e:
             await update.message.reply_text(f"❌ 구독 삭제 실패: {e}")
             return
         names = await _dh._fetch_discord_usernames([str(uid)])
-        name = names.get(str(uid), str(uid))
+        name = md_escape(names.get(str(uid), str(uid)))
         if deleted:
-            await update.message.reply_text(
-                f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 삭제", parse_mode="Markdown"
+            await _utils.safe_reply(
+                update.message, f"✅ *{name}* (`{uid}`) 봉봉뉴스 구독 삭제", parse_mode="Markdown"
             )
         else:
-            await update.message.reply_text(
-                f"ℹ️ *{name}* (`{uid}`) 구독자 아님", parse_mode="Markdown"
+            await _utils.safe_reply(
+                update.message, f"ℹ️ *{name}* (`{uid}`) 구독자 아님", parse_mode="Markdown"
             )
 
     else:
@@ -169,6 +205,18 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "사용법: `!sub add <userID>` / `!sub del <userID>`\n봉봉뉴스 구독자 목록은 `!list` 참조",
             parse_mode="Markdown",
         )
+
+
+def _events_cutoff(days: int) -> str:
+    """Lower bound for a subscription_events.ts window, as a comparable string.
+
+    ts defaults to sqlite's datetime('now'), i.e. "YYYY-MM-DD HH:MM:SS", and the
+    query compares it lexically. isoformat() puts a "T" where the stored value
+    has a space, and "T" (0x54) sorts above " " (0x20) - so every event that
+    fell on the cutoff's own date compared as older than the cutoff and dropped
+    out of the window entirely.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @admin_only
@@ -185,24 +233,33 @@ async def cmd_sub_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for p in parts:
         if _re.match(r"^\d{1,3}d$", p):
             days = int(p[:-1])
-        elif p.isdigit() and len(p) > 4:
-            uid = int(p)
+        else:
+            candidate = parse_user_id(p)
+            if candidate is not None and len(str(candidate)) > 4:
+                uid = candidate
 
+    # Opened on the event loop. Bounded exposure: these are plain SELECTs
+    # with no retry sleep, so the worst stall is get_bbs_db's 4s busy
+    # timeout. Every write, and the multi-query !list/!hp/!newscc paths, go
+    # through db_write_async/db_read_async instead.
     conn = _cfg.open_db()
     if conn is None:
         await update.message.reply_text("DB not found.")
         return
 
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = _events_cutoff(days)
         if uid:
             rows = conn.execute(
                 "SELECT source, action, ts FROM subscription_events"
                 " WHERE user_id = ? AND ts > ? ORDER BY ts DESC LIMIT 50",
                 (uid, cutoff),
             ).fetchall()
+            # Release the shared DB before the HTTP await; the summary branch
+            # below needs the connection, so only this path closes early.
+            conn.close()
             names = await _dh._fetch_discord_usernames([str(uid)])
-            name = names.get(str(uid), str(uid))
+            name = md_escape(names.get(str(uid), str(uid)))
             lines = [f"*{name}* 구독 이벤트 (최근 {days}일)\n"]
             for r in rows:
                 ts = _to_kst(r["ts"])

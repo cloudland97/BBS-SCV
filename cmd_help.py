@@ -21,6 +21,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`!news2 내용` — 미디어 캡션으로 봉봉뉴스 발송\n"
         "`!newslist` — 예약된 뉴스 목록\n"
         "`!newscc <ID>` — 예약 취소\n"
+        "`!newscc <ID> force` — 'sending' 상태로 멈춘 예약 강제 해제\n"
         "`!help` — 이 메시지\n\n"
         "🎮 *Discord 봇*\n"
         "`!re` — Discord 봇 재시작\n"

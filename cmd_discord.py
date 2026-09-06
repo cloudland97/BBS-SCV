@@ -1,6 +1,7 @@
 """Commands: Discord bot management (!re, !dm, !ud, !log, !hp)."""
 
 import asyncio
+import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,36 @@ import tg_config as _cfg
 import tg_utils as _utils
 import discord_helpers as _dh
 from tg_config import KST as _KST
-from tg_utils import admin_only, _to_kst, ensure_utc
+from tg_utils import admin_only, _to_kst, ensure_utc, md_escape, parse_user_id
+
+
+# The BBS bot logs through TimedRotatingFileHandler with the default namer:
+# the live file keeps its base name and each rotated day gets a .YYYY-MM-DD
+# suffix. Both helpers below used to encode a scheme that never existed.
+_MAX_LOG_DAYS = 365
+
+# Seam for the post-restart settle wait. Tests replace this rather than
+# asyncio.sleep, which they would otherwise swap out process-wide.
+_sleep = asyncio.sleep
+
+
+def _bot_log_path(logs_dir):
+    """Path of the BBS bot's current info log.
+
+    The old bot_<date>.txt guess never matched a real file, so the post-restart
+    error check silently did nothing on every restart since it was written.
+    """
+    return logs_dir / "bot.log"
+
+
+def _error_log_path(logs_dir, days_ago: int, target_date: str):
+    """Path of the BBS error log for a given age in days.
+
+    Today's errors are still in error.log; older days rotate to
+    error.log.YYYY-MM-DD. The old error_<date>.log guess matched nothing, so
+    !log answered "No error log" every single time it was run.
+    """
+    return logs_dir / ("error.log" if days_ago == 0 else f"error.log.{target_date}")
 
 
 @admin_only
@@ -24,11 +54,24 @@ async def cmd_drestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Discord 봇 재시작 중...")
     discord_path = _cfg.PROJECTS["discord"]
     try:
+        # The bot root travels in an environment variable instead of being
+        # interpolated into the script text, so nothing in the path can
+        # terminate a PowerShell string. $rootPrefix also pins every match to
+        # that exact directory: the old '*<root>*' pattern matched sibling
+        # checkouts such as BBS-SCV and bbs-web too.
         ps_command = (
+            "$root = $env:BBS_RESTART_ROOT; "
+            # Without a root every -like pattern collapses to '**' and the
+            # script would sweep unrelated python processes; refuse instead.
+            "if (-not $root) { 'no-root'; exit 1 }; "
+            "$rootPrefix = $root.TrimEnd('\\') + '\\'; "
+            # [ and ] are wildcards to -like; escape them so the filter
+            # cannot widen past this exact directory.
+            "$likePrefix = [WildcardPattern]::Escape($rootPrefix); "
             "$cmd = Get-CimInstance Win32_Process | "
-            f"Where-Object {{ $_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*{discord_path}*run.bat*' }}; "
+            "Where-Object { $_.Name -eq 'cmd.exe' -and $_.CommandLine -like ('*' + $likePrefix + 'run.bat*') }; "
             "$py = Get-CimInstance Win32_Process | "
-            f"Where-Object {{ $_.Name -eq 'python.exe' -and $_.CommandLine -like '*bot.py*' -and $_.CommandLine -like '*{discord_path}*' }}; "
+            "Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*bot.py*' -and $_.CommandLine -like ('*' + $likePrefix + '*') }; "
             "$killed = @(); "
             "$pids = @(); "
             "foreach ($p in @($cmd) + @($py)) { if ($p) { $pids += $p.ProcessId; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $killed += [string]$p.ProcessId } }; "
@@ -36,21 +79,27 @@ async def cmd_drestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "  $deadline = (Get-Date).AddSeconds(5); "
             "  do { Start-Sleep -Milliseconds 300; $still = @($pids | Where-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue) -ne $null }) } while ($still.Count -gt 0 -and (Get-Date) -lt $deadline) "
             "}; "
-            f"$proc = Start-Process -WindowStyle Minimized -FilePath 'cmd.exe' -ArgumentList '/c', '{discord_path}\\run.bat' -WorkingDirectory '{discord_path}' -PassThru; "
+            "$proc = Start-Process -WindowStyle Minimized -FilePath 'cmd.exe' -ArgumentList '/c', ('\"' + $rootPrefix + 'run.bat\"') -WorkingDirectory $root -PassThru; "
             "Start-Sleep -Milliseconds 800; "
             "if ($proc -and -not $proc.HasExited) { $killed += 'started' } else { $killed += 'spawn-failed' }; "
             "$killed -join ','"
         )
         result = await asyncio.to_thread(
             subprocess.run,
-            ["powershell", "-Command", ps_command],
+            ["powershell", "-NoProfile", "-Command", ps_command],
             capture_output=True,
             text=True,
             timeout=30,
+            env={**os.environ, "BBS_RESTART_ROOT": discord_path},
         )
         killed = result.stdout.strip()
         err = result.stderr.strip()
-        if "spawn-failed" in killed:
+        if killed == "no-root":
+            _cfg.log.error("Discord restart aborted: BBS_RESTART_ROOT was empty")
+            await update.message.reply_text(
+                "Restart aborted: the Discord bot root path is not configured."
+            )
+        elif "spawn-failed" in killed:
             # New process image exited immediately — treat as a failed spawn.
             _cfg.log.error(f"Discord restart: new process failed to start stderr={err}")
             await update.message.reply_text(
@@ -70,10 +119,9 @@ async def cmd_drestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Check the latest Discord bot log for errors after a short delay
-    await asyncio.sleep(6)
+    await _sleep(6)
     try:
-        today = datetime.now(_KST).strftime("%Y-%m-%d")
-        log_file = _cfg.DISCORD_LOGS_PATH / f"bot_{today}.txt"
+        log_file = _bot_log_path(_cfg.DISCORD_LOGS_PATH)
         if log_file.exists():
             lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
             tail = lines[-10:] if len(lines) >= 10 else lines
@@ -115,20 +163,20 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     rest = text[len("!dm") :].strip()
     parts = rest.split(" ", 1)
-    if len(parts) < 2 or not parts[0].isdigit():
+    user_id = parse_user_id(parts[0]) if parts else None
+    if len(parts) < 2 or user_id is None:
         await update.message.reply_text(
             "사용법: `!dm <userID> <message>`\n예시: `!dm 123456789012345678 안녕하세요`",
             parse_mode="Markdown",
         )
         return
 
-    user_id = int(parts[0])
     message = parts[1].strip()
     if not message:
         await update.message.reply_text("❌ 메시지 내용을 입력해주세요.")
         return
 
-    token = _dh._get_discord_token()
+    token = await _dh._get_discord_token_async()
     if not token:
         await update.message.reply_text("❌ Discord 토큰을 찾을 수 없어요.")
         return
@@ -150,6 +198,10 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!ud [userID] — View stored user DMs. No arg = summary, with arg = messages."""
+    # Opened on the event loop. Bounded exposure: these are plain SELECTs
+    # with no retry sleep, so the worst stall is get_bbs_db's 4s busy
+    # timeout. Every write, and the multi-query !list/!hp/!newscc paths, go
+    # through db_write_async/db_read_async instead.
     conn = _cfg.open_db()
     if conn is None:
         await update.message.reply_text("DB not found.")
@@ -157,20 +209,23 @@ async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip()
     arg = text[len("!ud") :].strip()
+    uid = parse_user_id(arg) if arg else None
 
     try:
-        if arg and arg.isdigit():
-            uid = int(arg)
+        if uid is not None:
             rows = conn.execute(
                 "SELECT content, created_at FROM user_dm"
                 " WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
                 (uid,),
             ).fetchall()
+            # Release the shared DB before any HTTP await: this handler used to
+            # keep the connection open across a 15s Discord username lookup.
+            conn.close()
             if not rows:
                 await update.message.reply_text(f"No DMs from {uid}")
                 return
             names = await _dh._fetch_discord_usernames([str(uid)])
-            name = names.get(str(uid), str(uid))
+            name = md_escape(names.get(str(uid), str(uid)))
             lines = [f"*{name}* (`{uid}`) DM ({len(rows)})\n"]
             for r in rows:
                 ts = _to_kst(r["created_at"])
@@ -182,6 +237,7 @@ async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "SELECT user_id, COUNT(*) as cnt, MAX(created_at) as last_at"
                 " FROM user_dm GROUP BY user_id ORDER BY last_at DESC"
             ).fetchall()
+            conn.close()
             if not rows:
                 await update.message.reply_text("No DMs stored.")
                 return
@@ -190,7 +246,7 @@ async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = ["*User DM Log*\n"]
             for r in rows:
                 uid_str = str(r["user_id"])
-                name = names.get(uid_str, uid_str)
+                name = md_escape(names.get(uid_str, uid_str))
                 last = _to_kst(r["last_at"]) if r["last_at"] else "?"
                 lines.append(f"*{name}* (`{uid_str}`) — {r['cnt']}건 (last: {last})")
             await _utils.safe_reply(update.message, "\n".join(lines))
@@ -205,10 +261,12 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = text[len("!log") :].strip()
 
     m = re.match(r"^(\d+)d?$", arg)
-    days_ago = int(m.group(1)) if m else 0
+    # An unbounded N made timedelta raise OverflowError; retention is 30 days,
+    # so anything past a year is a typo either way.
+    days_ago = min(int(m.group(1)), _MAX_LOG_DAYS) if m else 0
 
     target_date = (datetime.now(_KST) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
-    err_file = _cfg.DISCORD_LOGS_PATH / f"error_{target_date}.log"
+    err_file = _error_log_path(_cfg.DISCORD_LOGS_PATH, days_ago, target_date)
     label = "오늘" if days_ago == 0 else f"{days_ago}일 전 ({target_date})"
 
     if not err_file.exists():
@@ -235,15 +293,14 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_hp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!hp — Discord bot loop health from SQLite loop_health table."""
-    conn = _cfg.open_db()
-    if conn is None:
+    if not _cfg.BBS_DB_PATH.exists():
         await update.message.reply_text("DB not found.")
         return
 
     now_kst = datetime.now(_KST)
     dates = [(now_kst - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
 
-    try:
+    def _read(conn):
         health = {
             r["loop_id"]: r
             for r in conn.execute("SELECT loop_id, last_run FROM loop_health").fetchall()
@@ -252,8 +309,11 @@ async def cmd_hp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT loop_id, date, run_count FROM loop_health_daily WHERE date IN (?,?,?)",
             dates,
         ).fetchall()
-    finally:
-        conn.close()
+        return health, daily_rows
+
+    # Off the event loop: opening the shared bbs.db blocks for up to the 4s busy
+    # timeout whenever the Discord bot is mid-write.
+    health, daily_rows = await _cfg.db_read_async(_read)
 
     daily: dict[str, dict[str, int]] = {}
     for r in daily_rows:

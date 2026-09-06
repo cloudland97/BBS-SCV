@@ -7,9 +7,16 @@ Split modules:
 """
 
 import asyncio
+import atexit
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -36,7 +43,7 @@ from tg_config import (
     get_bbs_db,
     log,
 )
-from tg_utils import ensure_utc
+from tg_utils import ensure_utc, md_escape, safe_reply, safe_send
 from discord_helpers import _broadcast_bbnews, _broadcast_bbnews_auto
 import cmd_news_schedule as _cns
 
@@ -86,7 +93,90 @@ async def _loop_monitor_task(app):
 # -- News scheduler --
 
 
+def _send_status(news_id, ok_count: int, fail_count: int) -> str:
+    """Status to record for a broadcast that returned (ok_count, fail_count).
+
+    Three outcomes, not two:
+
+    - reached somebody                       -> 'sent'
+    - every recipient attempted, all failed  -> 'failed' (terminal)
+    - nothing attempted at all, (0, 0)       -> 'pending', a limited number of
+      times. No Discord token or no subscribers means no delivery was even
+      tried, so recording a failure would be a lie, and the row should still go
+      out once the cause is fixed. But leaving it pending forever live-locks the
+      30s scheduler, which reclaims it and messages the operator every cycle.
+      After MAX_UNATTEMPTED_ATTEMPTS it becomes 'failed' and stops.
+
+    Spends the retry budget as a side effect, and returns it on any terminal
+    outcome so a row that later succeeds does not carry an old count.
+    """
+    if ok_count:
+        _cns.forget_attempts(news_id)
+        return "sent"
+    if fail_count:
+        _cns.forget_attempts(news_id)
+        return "failed"
+    if _cns.record_unattempted(news_id) >= _cns.MAX_UNATTEMPTED_ATTEMPTS:
+        _cns.forget_attempts(news_id)
+        return "failed"
+    return "pending"
+
+
+async def _report_send_outcome(bot, label: str, news_id, ok_count, fail_count, status) -> None:
+    """Log a broadcast result, and tell the operator once when retrying stops.
+
+    'failed' with fail_count 0 can only come from the exhausted retry budget:
+    every real delivery failure has attempted at least one recipient. That is
+    the one case worth a message, because nothing will happen after it.
+    """
+    if status == "sent":
+        return
+    if status == "failed" and fail_count:
+        log.error(
+            "%s news id=%s reached no subscriber (%d attempted, all failed)",
+            label,
+            news_id,
+            fail_count,
+        )
+        return
+    if status == "failed":
+        log.error(
+            "%s news id=%s not attempted %d times; giving up",
+            label,
+            news_id,
+            _cns.MAX_UNATTEMPTED_ATTEMPTS,
+        )
+        await safe_send(
+            bot,
+            ALLOWED_USER_ID,
+            f"❌ 예약 뉴스 `[{news_id}]` 발송 포기: "
+            f"{_cns.MAX_UNATTEMPTED_ATTEMPTS}회 시도했지만 보낼 대상이 없었습니다 "
+            "(Discord 토큰 없음 또는 봉봉뉴스 구독자 없음). `failed` 처리되어 "
+            "재시도하지 않습니다. 원인 해결 후 `!news`로 다시 예약하세요.",
+        )
+        return
+    log.warning(
+        "%s news id=%s was not attempted (no token or no subscribers); "
+        "left pending for the next cycle",
+        label,
+        news_id,
+    )
+
+
 async def _check_boot_scheduled_news(app):
+    """Run the boot news check without ever aborting startup.
+
+    post_init runs before polling begins, so anything raised in here killed
+    the bot outright - one stored row whose content broke Markdown parsing
+    was enough to stop the bridge from ever coming up.
+    """
+    try:
+        await _boot_scheduled_news(app)
+    except Exception as e:
+        log.error(f"Boot scheduled-news check failed: {e}", exc_info=True)
+
+
+async def _boot_scheduled_news(app):
     """On boot: send news due within 15 min; expire and notify anything older.
 
     Also detect rows orphaned in 'sending' by a crash mid-send and warn the admin.
@@ -98,7 +188,7 @@ async def _check_boot_scheduled_news(app):
 
     # Stale-'sending' recovery: rows claimed >5 min ago that never reached 'sent'.
     # A human decides whether they actually went out; we only surface them.
-    stale = _cns.get_stale_sending(now_utc - timedelta(minutes=5))
+    stale = await _cns.a_get_stale_sending(now_utc - timedelta(minutes=5))
     if stale:
         lines = [
             f"⚠️ 발송 중(sending) 상태로 멈춘 예약 뉴스 {len(stale)}건 — 발송 여부 수동 확인 필요:"
@@ -110,14 +200,12 @@ async def _check_boot_scheduled_news(app):
                 .astimezone(KST)
             )
             lines.append(
-                f"• `[{item['id']}]` {claimed_kst.strftime('%m/%d %H:%M')} claimed — {item['content'][:30]}..."
+                f"• `[{item['id']}]` {claimed_kst.strftime('%m/%d %H:%M')} claimed — {md_escape(item['content'][:30])}..."
             )
-        await app.bot.send_message(
-            chat_id=ALLOWED_USER_ID, text="\n".join(lines), parse_mode="Markdown"
-        )
+        await safe_send(app.bot, ALLOWED_USER_ID, "\n".join(lines))
 
     cutoff = now_utc - timedelta(minutes=15)
-    due = _cns.get_due(now_utc)
+    due = await _cns.a_get_due(now_utc)
     if not due:
         return
 
@@ -135,26 +223,36 @@ async def _check_boot_scheduled_news(app):
                 .astimezone(KST)
             )
             lines.append(
-                f"• `[{item['id']}]` {dt_kst.strftime('%m/%d %H:%M')} — {item['content'][:30]}..."
+                f"• `[{item['id']}]` {dt_kst.strftime('%m/%d %H:%M')} — {md_escape(item['content'][:30])}..."
             )
-            _cns.set_status_if_pending(item["id"], "expired")
-        await app.bot.send_message(
-            chat_id=ALLOWED_USER_ID, text="\n".join(lines), parse_mode="Markdown"
-        )
+            await _cns.a_set_status_if_pending(item["id"], "expired")
+        await safe_send(app.bot, ALLOWED_USER_ID, "\n".join(lines))
 
     for item in send_now:
         # Same claim-before-send guard as the 30s loop (the scheduler task also
         # starts on boot, so both could race the same due row).
-        if not _cns.claim_for_send(item["id"]):
+        if not await _cns.a_claim_for_send(item["id"]):
             continue
+        sent_ok = False
         try:
-            await _broadcast_bbnews_auto(app.bot, ALLOWED_USER_ID, item["content"])
-            _cns.mark_status(item["id"], "sent")
+            ok_count, fail_count = await _broadcast_bbnews_auto(
+                app.bot, ALLOWED_USER_ID, item["content"]
+            )
+            # The DMs are out. Nothing after this point may re-queue the row.
+            sent_ok = True
+            status = _send_status(item["id"], ok_count, fail_count)
+            await _cns.a_mark_status(item["id"], status)
+            await _report_send_outcome(app.bot, "Boot", item["id"], ok_count, fail_count, status)
         except Exception as e:
-            # Send did not complete -> back to 'pending' for retry; a post-send
-            # mark failure leaves it 'sending' (not re-sent) -> no duplicate.
-            _cns.mark_status(item["id"], "pending")
-            log.error(f"Boot scheduled news send failed id={item['id']}: {e}")
+            if sent_ok:
+                # Only the status write failed. Leave the row 'sending': it is
+                # terminal for the scheduler (get_due is pending-only), so the
+                # news is never re-sent, and !newslist surfaces it for a human.
+                log.error(f"Boot scheduled news status write failed id={item['id']}: {e}")
+            else:
+                # Send did not complete -> back to 'pending' for retry.
+                await _cns.a_mark_status(item["id"], "pending")
+                log.error(f"Boot scheduled news send failed id={item['id']}: {e}")
 
 
 async def _news_scheduler_task(app):
@@ -165,23 +263,35 @@ async def _news_scheduler_task(app):
         if not BBS_DB_PATH.exists():
             continue  # standalone clone / BBS bot not set up yet
         try:
-            due = _cns.get_due(datetime.now(timezone.utc))
+            due = await _cns.a_get_due(datetime.now(timezone.utc))
             for item in due:
                 # Claim BEFORE broadcasting: only one winner flips 'pending' ->
                 # 'sending', so get_due won't re-pick this row next cycle -> no
                 # duplicate. A lost claim means another cycle already has it.
-                if not _cns.claim_for_send(item["id"]):
+                if not await _cns.a_claim_for_send(item["id"]):
                     continue
                 log.info(f"Sending scheduled news id={item['id']}")
+                sent_ok = False
                 try:
-                    await _broadcast_bbnews_auto(app.bot, ALLOWED_USER_ID, item["content"])
-                    _cns.mark_status(item["id"], "sent")
+                    ok_count, fail_count = await _broadcast_bbnews_auto(
+                        app.bot, ALLOWED_USER_ID, item["content"]
+                    )
+                    # The DMs are out. Nothing after this point may re-queue it.
+                    sent_ok = True
+                    status = _send_status(item["id"], ok_count, fail_count)
+                    await _cns.a_mark_status(item["id"], status)
+                    await _report_send_outcome(
+                        app.bot, "Scheduled", item["id"], ok_count, fail_count, status
+                    )
                 except Exception as e:
-                    # Send did NOT complete -> revert to 'pending' so it retries.
-                    # If mark_status('sent') above fails after a real send, the row
-                    # stays 'sending' (not reverted here) and is never re-sent.
-                    _cns.mark_status(item["id"], "pending")
-                    log.error(f"Scheduled news send failed id={item['id']}: {e}")
+                    if sent_ok:
+                        # Only the status write failed; the row stays 'sending',
+                        # which get_due never re-picks, so it is not re-sent.
+                        log.error(f"Scheduled news status write failed id={item['id']}: {e}")
+                    else:
+                        # Send did NOT complete -> revert to 'pending' so it retries.
+                        await _cns.a_mark_status(item["id"], "pending")
+                        log.error(f"Scheduled news send failed id={item['id']}: {e}")
         except Exception as e:
             log.error(f"News scheduler error: {e}")
 
@@ -230,12 +340,18 @@ async def cmd_bbnews_text(update: Update, content: str):
     await _broadcast_bbnews(update, content)
 
 
-async def cmd_bbnews(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point for /bbnews slash command."""
-    if update.effective_user.id != ALLOWED_USER_ID:
-        return
-    content = " ".join(context.args).strip()
-    await cmd_bbnews_text(update, content)
+def _safe_media_filename(raw) -> str:
+    """Reduce a client-supplied file name to a bare name with no path parts.
+
+    Document.file_name comes from whoever uploaded the file, so a name like
+    "..\\..\\x.txt" used to place the download outside the target directory
+    (and then delete whatever it landed on). PureWindowsPath treats both slash
+    styles as separators on every platform, so this holds on Linux CI too.
+    """
+    name = PureWindowsPath(str(raw or "")).name
+    if not name or name in (".", ".."):
+        name = f"media_{time.time_ns()}"
+    return name
 
 
 async def _handle_news_media(
@@ -243,21 +359,32 @@ async def _handle_news_media(
 ):
     """Handle !news2 media — download from Telegram and broadcast to Discord."""
     content = caption[len("!news2") :].strip().replace("\\n", "\n")
-    tg_file = await context.bot.get_file(media.file_id)
+    try:
+        tg_file = await context.bot.get_file(media.file_id)
+    except Exception as e:
+        # Telegram refuses files over 20MB with a BadRequest; the admin used to
+        # get no reply at all and could not tell the send from a silent drop.
+        log.warning(f"news2 get_file failed: {e}")
+        await safe_reply(update.message, f"❌ 미디어 다운로드 실패: {e}", parse_mode=None)
+        return
+
     fname = getattr(media, "file_name", None)
     if not fname:
         ext = ".mp4" if hasattr(media, "duration") else ".jpg"
         fname = f"media_{time.time_ns()}{ext}"
-    tmp = Path(PROJECTS["discord"]) / f"_tg_news_{time.time_ns()}_{fname}"
-    await tg_file.download_to_drive(str(tmp))
+    # Private temp dir, not the BBS project root: downloads used to litter a
+    # working git tree that has no ignore rule for them.
+    tmpdir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
+    tmp = Path(tmpdir) / _safe_media_filename(fname)
     try:
+        await tg_file.download_to_drive(str(tmp))
         file_bytes = tmp.read_bytes()
         await _broadcast_bbnews(update, content, file_bytes, tmp.name)
+    except Exception as e:
+        log.warning(f"news2 media broadcast failed: {e}")
+        await safe_reply(update.message, f"❌ 미디어 발송 실패: {e}", parse_mode=None)
     finally:
-        try:
-            tmp.unlink()
-        except Exception as e:
-            log.debug(f"cleanup failed: {e}")
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # -- Main message handler --
@@ -282,13 +409,22 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
             if not content:
                 await update.message.reply_text("내용을 입력해주세요.")
                 return
-            news_id = _cns.save_scheduled(content, scheduled_at)
+            news_id = await _cns.a_save_scheduled(content, scheduled_at)
             dt_kst = scheduled_at.astimezone(ZoneInfo("Asia/Seoul"))
-            await update.message.reply_text(
+            await safe_reply(
+                update.message,
                 f"✅ 예약됨 `[{news_id}]`\n"
                 f"📅 {dt_kst.strftime('%m/%d(%a) %H:%M')} KST\n"
                 f"📝 {content[:60]}",
                 parse_mode="Markdown",
+            )
+        except sqlite3.OperationalError as e:
+            # save_scheduled is deliberately single-attempt (retrying an
+            # INSERT could double-schedule), so a locked DB surfaces here.
+            # Silence let the operator believe the news was scheduled.
+            log.error(f"save_scheduled failed: {e}")
+            await update.message.reply_text(
+                "❌ DB 사용 중 — 뉴스가 예약되지 않았습니다. 잠시 후 다시 시도하세요."
             )
         except ValueError as e:
             if str(e) == _cns._NO_TIME:
@@ -318,28 +454,43 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
 
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = (update.message.text or "").strip()
+    # PTB message filters key off effective_message, so edited_message,
+    # channel_post and business_message updates all reach this handler with
+    # update.message set to None. Dereferencing it before the auth gate raised
+    # AttributeError for anyone who merely edited a message at the bot.
+    message = update.message
+    if message is None:
+        return
+    user = update.effective_user
+
+    t = (message.text or "").strip()
     if t == "!chatid":
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
-        await update.message.reply_text(
-            f"chat_id: `{chat_id}`\nuser_id: `{user_id}`", parse_mode="Markdown"
+        chat = update.effective_chat
+        await message.reply_text(
+            f"chat_id: `{chat.id if chat else '?'}`\nuser_id: `{user.id if user else '?'}`",
+            parse_mode="Markdown",
         )
         return
-    if update.effective_user.id != ALLOWED_USER_ID:
-        await update.message.reply_text("No permission")
+    # effective_user is None for channel posts, which must not pass the gate.
+    if user is None or user.id != ALLOWED_USER_ID:
+        await message.reply_text("No permission")
         return
-    if update.message.photo:
+    if message.photo:
         await handle_photo(update, context)
-    elif update.message.video:
+    elif message.video:
         await handle_video(update, context)
-    elif update.message.document:
+    elif message.document:
         await handle_document(update, context)
     else:
-        await _dispatch_text(update, context, (update.message.text or "").strip())
+        await _dispatch_text(update, context, t)
 
 
 # -- Startup --
+
+
+# Prefix for the per-download temp directories, shared by the writer and the
+# orphan sweeper so the two can never drift apart.
+_TEMP_PREFIX = "_tg_news_"
 
 
 def _cleanup_old_logs(days: int = 30):
@@ -355,19 +506,259 @@ def _cleanup_old_logs(days: int = 30):
 
 
 def _cleanup_orphan_temp(max_age_sec: int = 3600):
-    """Delete orphaned _tg_* download temp files left behind by crashes."""
+    """Delete orphaned media-download temp dirs left behind by crashes.
+
+    Sweeps the system temp dir, where downloads now land, and still sweeps the
+    BBS project root for files written by pre-2026-09 builds.
+    """
     cutoff = time.time() - max_age_sec
+
+    def _remove_if_stale(entry: Path):
+        try:
+            if entry.stat().st_mtime >= cutoff:
+                return
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+            log.info("Deleted orphan temp: %s", entry.name)
+        except Exception as e:
+            log.debug(f"orphan cleanup failed: {e}")
+
+    for entry in Path(tempfile.gettempdir()).glob(f"{_TEMP_PREFIX}*"):
+        _remove_if_stale(entry)
+    # Legacy location: downloads used to be written into the project tree.
     for proj_dir in {Path(p) for p in PROJECTS.values()}:
         if not proj_dir.exists():
             continue
         for f in proj_dir.glob("_tg_*"):
-            try:
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-                    log.info("Deleted orphan temp: %s", f.name)
-            except Exception as e:
-                log.debug(f"orphan cleanup failed: {e}")
+            _remove_if_stale(f)
 
+
+def _run_daily_maintenance():
+    """Housekeeping the bridge owes once a day: log retention and a heartbeat.
+
+    _cleanup_old_logs and _cleanup_orphan_temp used to run only in post_init, so
+    a process that stayed up for weeks never pruned either one - which is how a
+    month of token-bearing logs survived. The heartbeat exists because a healthy
+    bridge can go days without emitting a single line, making "alive"
+    indistinguishable from "dead" in the log.
+    """
+    try:
+        _cleanup_old_logs()
+    except Exception as e:
+        log.warning(f"Scheduled log cleanup failed: {e}")
+    try:
+        _cleanup_orphan_temp()
+    except Exception as e:
+        log.warning(f"Scheduled temp cleanup failed: {e}")
+    uptime_h = (time.monotonic() - _START_TIME) / 3600
+    log.info("Bridge heartbeat: alive, uptime %.1fh", uptime_h)
+
+
+async def _maintenance_task():
+    """Background task: run _run_daily_maintenance once every 24h."""
+    while True:
+        await asyncio.sleep(_MAINTENANCE_INTERVAL_SEC)
+        try:
+            _run_daily_maintenance()
+        except Exception as e:
+            log.error(f"Maintenance task error: {e}")
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with this pid exists.
+
+    os.kill(pid, 0) is NOT usable here: on Windows CPython maps os.kill to
+    TerminateProcess, so the liveness probe would kill the process it asks about.
+
+    Windows answers via WaitForSingleObject rather than GetExitCodeProcess: a
+    process that exited with code 259 is indistinguishable from a running one
+    under STILL_ACTIVE, while the wait handle is signalled only once the process
+    has really terminated.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        SYNCHRONIZE = 0x00100000
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        WAIT_TIMEOUT = 0x00000102
+        ERROR_ACCESS_DENIED = 5
+        ERROR_INVALID_PARAMETER = 87
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+
+        handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if not handle:
+            # A failed open is not proof of death. Windows reports a running
+            # process this account may not touch as ACCESS_DENIED, and only
+            # INVALID_PARAMETER actually means "no process with that id".
+            err = ctypes.get_last_error()
+            if err == ERROR_ACCESS_DENIED:
+                return True
+            if err != ERROR_INVALID_PARAMETER:
+                log.debug("OpenProcess(%s) failed with error %s", pid, err)
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+# Substring that identifies this bridge in a process command line.
+_BRIDGE_MARKER = "telegram_bridge.py"
+
+
+def _process_command_line(pid: int):
+    """Command line of a running process, or None when it cannot be read.
+
+    None means "could not determine", never "not running" - callers have to fail
+    open on it. Windows has no cheap ctypes route to another process's command
+    line, so this shells out to CIM; the pid travels in the environment so no
+    value is ever interpolated into the query.
+    """
+    if sys.platform == "win32":
+        script = (
+            "$p = Get-CimInstance Win32_Process "
+            '-Filter "ProcessId=$env:BRIDGE_PROBE_PID" -ErrorAction SilentlyContinue; '
+            "if ($null -eq $p) { 'NOPROC' } "
+            # A CommandLine of $null means the process exists but will not say
+            # what it is - a protected or cross-session process. That is
+            # "cannot tell", not "not running".
+            "elseif ($null -eq $p.CommandLine) { 'UNKNOWN' } "
+            "else { 'CMD:' + $p.CommandLine }"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env={**os.environ, "BRIDGE_PROBE_PID": str(pid)},
+            )
+        except Exception as e:
+            log.warning("Could not read command line for pid %s: %s", pid, e)
+            return None
+        out = (result.stdout or "").strip()
+        if result.returncode != 0 or not out:
+            return None
+        if out == "NOPROC":
+            return ""
+        if out == "UNKNOWN":
+            return None
+        return out[len("CMD:") :] if out.startswith("CMD:") else None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+
+
+def _lock_holder_state(pid: int) -> str:
+    """Classify the pid recorded in the lock file.
+
+    "gone"    - no such process, the file is stale.
+    "bridge"  - a running telegram_bridge; this start must stand down.
+    "other"   - a running process that is not the bridge; the pid was recycled.
+    "unknown" - the probe itself failed; the caller must fail open.
+    """
+    if pid <= 0:
+        return "gone"
+    if not _pid_alive(pid):
+        return "gone"
+    cmdline = _process_command_line(pid)
+    if cmdline is None:
+        return "unknown"
+    if not cmdline:
+        return "gone"
+    return "bridge" if _BRIDGE_MARKER in cmdline else "other"
+
+
+def acquire_single_instance(pid_path: Path = None) -> bool:
+    """Claim the bridge pid file. False means a live bridge already holds it.
+
+    Two pollers on one token make Telegram reject getUpdates with 409 Conflict,
+    and !re0 racing start_bot.bat has produced exactly that.
+
+    Liveness alone is not enough to justify refusing to start. After a crash or
+    a reboot the recorded pid is very likely to belong to some unrelated
+    process, and start_bot.bat ends in `pause` - so a wrong refusal leaves no
+    bridge running at all, waiting on a keypress nobody is there to give. Every
+    uncertain case therefore starts the bridge: only a pid whose command line
+    actually names this script stops it.
+    """
+    pid_path = pid_path or (LOG_DIR / "bridge.pid")
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip() if pid_path.exists() else ""
+    except Exception as e:
+        log.warning("Pid file %s unreadable (%s); treating it as stale.", pid_path, e)
+        raw = ""
+
+    # isascii() as well as isdigit(): the latter is True for Unicode digit forms
+    # that int() then rejects, and an exception here would abort the start.
+    holder = None
+    if raw.isascii() and raw.isdigit():
+        try:
+            holder = int(raw)
+        except ValueError:
+            holder = None
+    if holder is None:
+        if raw:
+            log.warning("Pid file %s holds %r, not a pid; treating it as stale.", pid_path, raw)
+    elif holder != os.getpid():
+        state = _lock_holder_state(holder)
+        if state == "bridge":
+            log.error("Another bridge instance is already running (pid %s); exiting.", holder)
+            return False
+        if state == "other":
+            log.warning("Pid %s belongs to an unrelated process; claiming the lock.", holder)
+        elif state == "unknown":
+            log.warning("Could not verify pid %s; starting anyway.", holder)
+
+    try:
+        pid_path.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception as e:
+        log.warning("Could not write pid file %s: %s", pid_path, e)
+    return True
+
+
+def release_single_instance(pid_path: Path = None) -> None:
+    """Delete our pid file, but only while it still names this process.
+
+    Leaving it behind makes the next start pay for a full CIM probe of a pid
+    that no longer exists. Deleting one another instance has since claimed would
+    be worse: it would hand a second poller the lock. So the content is checked
+    against this pid first, and any failure is a debug note - releasing a lock
+    must never be the thing that breaks a shutdown.
+    """
+    pid_path = pid_path or (LOG_DIR / "bridge.pid")
+    try:
+        if not pid_path.exists():
+            return
+        if pid_path.read_text(encoding="utf-8").strip() != str(os.getpid()):
+            return
+        pid_path.unlink()
+    except Exception as e:
+        log.debug("Could not remove pid file %s: %s", pid_path, e)
+
+
+_START_TIME = time.monotonic()
+_MAINTENANCE_INTERVAL_SEC = 24 * 3600
 
 # Strong refs to the background tasks: asyncio holds tasks weakly, so an
 # unreferenced create_task result can be garbage collected mid-run — the exact
@@ -381,6 +772,7 @@ async def post_init(application):
     check_shared_schema()
     _bg_tasks.append(asyncio.create_task(_loop_monitor_task(application)))
     _bg_tasks.append(asyncio.create_task(_news_scheduler_task(application)))
+    _bg_tasks.append(asyncio.create_task(_maintenance_task()))
     if BBS_DB_PATH.exists():
         await _check_boot_scheduled_news(application)
     else:
@@ -456,9 +848,16 @@ app.add_handler(
     )
 )
 if __name__ == "__main__":
-    import sys
-
+    if not acquire_single_instance():
+        print("another telegram bridge instance is already running; exiting.")
+        sys.exit(1)
+    # Both paths: the finally covers a normal return and an exception, atexit
+    # covers interpreter shutdown routes that skip it (sys.exit from a handler).
+    atexit.register(release_single_instance)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     print("telegram bridge running...")
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        release_single_instance()

@@ -1,8 +1,10 @@
 """Telegram bridge configuration — env loading, paths, constants."""
 
+import asyncio
 import logging
 import os
 import random
+import re
 import sqlite3
 import time
 from datetime import timedelta, timezone
@@ -41,9 +43,11 @@ _file_handler = TimedRotatingFileHandler(
 _file_handler.suffix = "%Y-%m-%d"
 _file_handler.namer = _log_namer
 
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format=LOG_FORMAT,
     handlers=[
         _file_handler,
         logging.StreamHandler(),
@@ -59,7 +63,91 @@ for _noisy in ("httpx", "httpcore", "telegram.ext.Updater", "telegram.request"):
 log = logging.getLogger("telegram_bridge")
 
 
+# -- Secret redaction --
+
+# A Telegram bot token travels in the API path (api.telegram.org/bot<TOKEN>/...).
+# httpx logged every request at INFO until 2026-08-24, which wrote roughly
+# 166,000 live-token lines into logs/. Lowering that logger's level fixed the
+# known emitter, but any library that logs a request URL or an exception
+# carrying one can do it again - so redact at the handler, not at the call site.
+_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+_TOKEN_MARKER = "bot<redacted>"
+
+
+def redact_tokens(text: str) -> str:
+    """Replace any Telegram bot token in *text* with a marker."""
+    return _TOKEN_RE.sub(_TOKEN_MARKER, text)
+
+
+class TokenRedactingFilter(logging.Filter):
+    """Strip bot tokens out of a record's message before it reaches a handler."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = redact_tokens(message)
+        if redacted != message:
+            # Render once here; args are consumed so downstream formatting is a
+            # no-op and cannot reintroduce the raw value.
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+class TokenRedactingFormatter(logging.Formatter):
+    """Formatter that also scrubs the formatted traceback.
+
+    The filter only sees the message; a token inside exc_info (httpx puts the
+    full URL in its exception text) is rendered later, so it needs this pass.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_tokens(super().format(record))
+
+
+def install_token_redaction(*handlers: logging.Handler) -> None:
+    """Attach the redacting filter and formatter to *handlers*.
+
+    Called with the root handlers at import time; safe to call again (a handler
+    keeps one filter instance per call, which is idempotent in effect).
+    """
+    for handler in handlers:
+        handler.addFilter(TokenRedactingFilter())
+        existing = handler.formatter
+        handler.setFormatter(
+            TokenRedactingFormatter(
+                fmt=getattr(existing, "_fmt", None) or LOG_FORMAT,
+                datefmt=getattr(existing, "datefmt", None),
+            )
+        )
+
+
+install_token_redaction(*logging.getLogger().handlers)
+
+
 # -- Env loading --
+
+
+def _parse_chat_id(raw: str, origin: str) -> int:
+    """Parse CHAT_ID, reporting what is wrong instead of a bare ValueError.
+
+    A non-numeric value used to surface as `invalid literal for int()` with no
+    hint about which setting or file was at fault.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise RuntimeError(
+            f"CHAT_ID in {origin} is empty - set it to your numeric Telegram user id."
+        )
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"CHAT_ID in {origin} must be a number, got {raw!r} - "
+            "use the numeric id that !chatid reports, not a @username."
+        ) from None
 
 
 def _load_tg_env() -> tuple[str, int, dict]:
@@ -71,19 +159,22 @@ def _load_tg_env() -> tuple[str, int, dict]:
             if line.startswith("BOT_TOKEN="):
                 token = line.split("=", 1)[1].strip()
             elif line.startswith("CHAT_ID="):
-                chat_id = int(line.split("=", 1)[1].strip())
+                chat_id = _parse_chat_id(line.split("=", 1)[1], str(env_file))
             elif "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 extras[k.strip()] = v.strip()
     # Env-var fallback so tests and CI can import this module without a real
     # tg.env (a fresh clone has none; the error below used to kill collection).
     token = token or os.getenv("TG_BOT_TOKEN")
-    if not chat_id and os.getenv("TG_CHAT_ID"):
-        chat_id = int(os.getenv("TG_CHAT_ID"))
+    if chat_id is None and os.getenv("TG_CHAT_ID"):
+        chat_id = _parse_chat_id(os.getenv("TG_CHAT_ID"), "the TG_CHAT_ID env var")
     if not token:
-        raise RuntimeError("BOT_TOKEN not found in tg.env")
-    if not chat_id:
-        raise RuntimeError("CHAT_ID not found in tg.env")
+        raise RuntimeError(f"BOT_TOKEN not found in {env_file} or the TG_BOT_TOKEN env var.")
+    # `not chat_id` also rejected a literal 0, which then read as "not found".
+    if chat_id is None:
+        raise RuntimeError(f"CHAT_ID not found in {env_file} or the TG_CHAT_ID env var.")
+    if chat_id == 0:
+        raise RuntimeError("CHAT_ID is 0, which is not a valid Telegram user id.")
     return token, chat_id, extras
 
 
@@ -208,6 +299,36 @@ def db_write(fn, max_attempts=5, base_sleep=0.05, max_total=8.0):
             time.sleep(sleep + random.uniform(0, base_sleep))
         finally:
             conn.close()
+
+
+async def db_write_async(fn, **kwargs):
+    """Await db_write off the event loop.
+
+    db_write retries SQLITE_BUSY with time.sleep (up to 8s). Run inline in a
+    handler that stalled the whole polling loop whenever the BBS bot held the
+    shared database.
+    """
+    return await asyncio.to_thread(db_write, fn, **kwargs)
+
+
+def db_read(fn):
+    """Run a read-only fn(conn) on a fresh connection and always close it."""
+    conn = get_bbs_db()
+    try:
+        return fn(conn)
+    finally:
+        conn.close()
+
+
+async def db_read_async(fn):
+    """Await db_read off the event loop (see db_write_async).
+
+    Not every read goes through here: !ud, !st and !se still open their
+    connection inline, which is safe because they issue plain SELECTs with no
+    retry sleep. Anything that writes, or that runs several queries in a row,
+    must use these wrappers.
+    """
+    return await asyncio.to_thread(db_read, fn)
 
 
 # Slash commands to track for !st

@@ -1,7 +1,9 @@
 """Telegram bridge utilities — message splitting, HUD, formatting helpers."""
 
+import re
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from typing import Optional
 
 from telegram.error import BadRequest
 
@@ -11,28 +13,96 @@ from tg_config import ALLOWED_USER_ID, log
 TG_MSG_LIMIT = 4000
 
 
-def split_message(text, limit=TG_MSG_LIMIT):
-    """Split text into <=limit-char chunks, preferring line boundaries.
+def u16_len(s: str) -> int:
+    """Length in UTF-16 code units, the unit Telegram and Discord actually cap.
 
-    Long messages (!list/!st/!hp) exceed Telegram's 4096-char cap and would
+    Python counts code points, so 1500 non-BMP emoji measure as 1500 characters
+    locally but are 3000 units to both APIs - a message that looked well under
+    the limit was rejected outright.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _split_at_units(s: str, limit: int) -> tuple[str, str]:
+    """Cut s so the head is at most `limit` UTF-16 units, never mid-code-point.
+
+    A surrogate pair has to stay together: splitting one yields an unpaired
+    surrogate that the API rejects and that mangles the emoji for the reader.
+    """
+    used = 0
+    for i, ch in enumerate(s):
+        ch_len = 2 if ord(ch) > 0xFFFF else 1
+        if used + ch_len > limit:
+            # A limit narrower than one code point would otherwise loop forever
+            # emitting empty heads; emit the whole code point instead.
+            return (s[:1], s[1:]) if i == 0 else (s[:i], s[i:])
+        used += ch_len
+    return s, ""
+
+
+def split_message(text, limit=TG_MSG_LIMIT):
+    """Split text into chunks of at most `limit` UTF-16 units, preferring line
+    boundaries.
+
+    Long messages (!list/!st/!hp) exceed Telegram's 4096-unit cap and would
     otherwise fail silently; this breaks them into sendable pieces without
     losing any content.
     """
-    if len(text) <= limit:
+    if u16_len(text) <= limit:
         return [text]
     chunks, current, current_len = [], [], 0
     for line in text.splitlines(keepends=True):
-        if current_len + len(line) > limit and current:
+        line_len = u16_len(line)
+        if current_len + line_len > limit and current:
             chunks.append("".join(current))
             current, current_len = [], 0
-        while len(line) > limit:
-            chunks.append(line[:limit])
-            line = line[limit:]
+        while line_len > limit:
+            head, line = _split_at_units(line, limit)
+            chunks.append(head)
+            line_len = u16_len(line)
         current.append(line)
-        current_len += len(line)
+        current_len += line_len
     if current:
         chunks.append("".join(current))
     return chunks
+
+
+# Telegram Markdown (v1) specials, backslash included: it is the escape
+# character itself, so an unescaped one consumes the character that follows.
+# Arbitrary interpolated content (news text, a Discord global_name holding an
+# underscore) turns the whole message into a BadRequest, so escape before
+# building a parse_mode="Markdown" payload.
+_MD_SPECIALS_RE = re.compile(r"([_*`\[\\])")
+
+
+def md_escape(text: str) -> str:
+    """Backslash-escape Telegram Markdown v1 specials in arbitrary text."""
+    return _MD_SPECIALS_RE.sub(r"\\\1", text or "")
+
+
+# Discord renders mentions as <@id> (and legacy <@!id>); accepting that form
+# lets an operator paste straight from Discord instead of digging out the id.
+_MENTION_RE = re.compile(r"^<@!?(\d+)>$")
+
+
+def parse_int_arg(raw: Optional[str]) -> Optional[int]:
+    """int() an argument only when it is ASCII digits, else None.
+
+    str.isdigit() is True for Unicode digit forms that int() then rejects
+    (U+00B2 SUPERSCRIPT TWO is one), which raised ValueError out of a handler
+    instead of printing the usage line.
+    """
+    raw = (raw or "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() else None
+
+
+def parse_user_id(raw: Optional[str]) -> Optional[int]:
+    """Parse a Discord user id from a bare number or a <@id> / <@!id> mention."""
+    raw = (raw or "").strip()
+    m = _MENTION_RE.match(raw)
+    if m:
+        raw = m.group(1)
+    return parse_int_arg(raw)
 
 
 def ensure_utc(dt: datetime) -> datetime:
@@ -57,7 +127,10 @@ def admin_only(func):
 
     @wraps(func)
     async def wrapper(update, context):
-        if update.effective_user.id != ALLOWED_USER_ID:
+        # effective_user is None for channel posts, so the old attribute access
+        # raised AttributeError before the permission check ever ran.
+        user = update.effective_user
+        if user is None or user.id != ALLOWED_USER_ID:
             return
         return await func(update, context)
 
@@ -78,3 +151,24 @@ async def safe_reply(message, text, parse_mode="Markdown"):
                 await message.reply_text(chunk)
             except Exception as e:
                 log.error(f"safe_reply error: {e}")
+        except Exception as e:
+            log.error(f"safe_reply error: {e}")
+
+
+async def safe_send(bot, chat_id, text, parse_mode="Markdown"):
+    """Bot-level counterpart to safe_reply, for sends with no Update to reply to.
+
+    Boot notifications interpolate stored news content into Markdown; one broken
+    row used to raise BadRequest out of post_init and kill the bot before
+    polling ever started.
+    """
+    for chunk in split_message(text):
+        try:
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=parse_mode)
+        except BadRequest:
+            try:
+                await bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception as e:
+                log.error(f"safe_send error: {e}")
+        except Exception as e:
+            log.error(f"safe_send error: {e}")

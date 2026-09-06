@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 import tg_config as _cfg
 import tg_utils as _utils
 import discord_helpers as _dh
-from tg_utils import admin_only
+from tg_utils import admin_only, md_escape, parse_user_id
 
 
 # Holds the pending !re0 restart task so GC can't collect it pre-fire.
@@ -64,24 +64,31 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time_params = ()
         period_label = ""
 
+    # Opened on the event loop. Bounded exposure: these are plain SELECTs
+    # with no retry sleep, so the worst stall is get_bbs_db's 4s busy
+    # timeout. Every write, and the multi-query !list/!hp/!newscc paths, go
+    # through db_write_async/db_read_async instead.
     conn = _cfg.open_db()
     if conn is None:
         await update.message.reply_text("DB not found.")
         return
 
+    uid = parse_user_id(arg)
     try:
-        if arg and arg.isdigit():
-            uid = int(arg)
+        if uid is not None:
             rows = conn.execute(
                 "SELECT command, COUNT(*) as cnt FROM command_usage"
                 " WHERE user_id = ?" + time_clause + " GROUP BY command ORDER BY cnt DESC",
                 (uid, *time_params),
             ).fetchall()
+            # Release the shared DB before any HTTP await: this handler used to
+            # keep the connection open across a 15s Discord username lookup.
+            conn.close()
             if not rows:
                 await update.message.reply_text(f"No usage data for {uid}")
                 return
             names = await _dh._fetch_discord_usernames([str(uid)])
-            name = names.get(str(uid), str(uid))
+            name = md_escape(names.get(str(uid), str(uid)))
             total = sum(r["cnt"] for r in rows)
             lines = [f"*{name}* (`{uid}`) — {total}회{period_label}\n"]
             for r in rows:
@@ -95,6 +102,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 + " GROUP BY user_id, command ORDER BY user_id, cnt DESC",
                 time_params,
             ).fetchall()
+            conn.close()
             if not rows:
                 await update.message.reply_text("No usage data yet.")
                 return
@@ -110,7 +118,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             names = await _dh._fetch_discord_usernames(sorted_uids)
             lines = [f"*📊 Command Usage Stats{period_label}*\n"]
             for uid_str in sorted_uids:
-                name = names.get(uid_str, uid_str)
+                name = md_escape(names.get(uid_str, uid_str))
                 total = user_totals[uid_str]
                 cmds = user_data[uid_str]
                 cmd_str = "  ".join(f"`{cmd}` ×{cnt}" for cmd, cnt in cmds)

@@ -1,5 +1,6 @@
 """Scheduled bongnews — parse time from !news, persist to DB, scheduler helpers."""
 
+import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -7,8 +8,9 @@ from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
 
+import tg_config as _cfg
 from tg_config import db_write, get_bbs_db
-from tg_utils import admin_only, ensure_utc
+from tg_utils import admin_only, ensure_utc, md_escape, parse_int_arg, safe_reply
 
 KST = ZoneInfo("Asia/Seoul")
 UTC = timezone.utc
@@ -25,7 +27,23 @@ TIME_FORMAT_HELP = (
 _NO_TIME = "NO_TIME"
 
 
+# Databases whose scheduled_news this process has already created/migrated.
+# Every accessor called _ensure_table, so the shared bbs.db took a DDL commit
+# every 30 seconds (~2,880/day) for a table that changes once per deployment.
+# Keyed by path, not a plain flag, so tests that swap in a temp DB still run it.
+_ensured_paths: set[str] = set()
+
+
+def reset_ensure_cache() -> None:
+    """Forget which databases have been migrated (test helper)."""
+    _ensured_paths.clear()
+
+
 def _ensure_table():
+    key = str(_cfg.BBS_DB_PATH)
+    if key in _ensured_paths:
+        return
+
     # Idempotent CREATE TABLE IF NOT EXISTS — safe to retry on SQLITE_BUSY/locked.
     def _w(conn):
         conn.execute("""
@@ -46,6 +64,7 @@ def _ensure_table():
             conn.execute("ALTER TABLE scheduled_news ADD COLUMN claimed_at TEXT")
 
     db_write(_w)
+    _ensured_paths.add(key)
 
 
 def parse_schedule_time(raw: str) -> tuple[datetime, str]:
@@ -140,6 +159,64 @@ def get_pending() -> list[dict]:
         conn.close()
 
 
+# Retry budget for rows that could not be attempted at all - no Discord token,
+# or no subscribers. Such a row stays 'pending' so it can go out once the cause
+# is fixed, but "stays pending" alone is a live-lock: the 30s scheduler reclaims
+# it every cycle and the broadcast helper messages the operator each time.
+# Three attempts, then it becomes terminal.
+#
+# Deliberately in memory: the budget is about one bridge's behaviour right now,
+# not a fact about the news item, and a restart is exactly the event after which
+# retrying afresh is the right thing to do. Keyed by row id, which is
+# AUTOINCREMENT and never reused within a database.
+MAX_UNATTEMPTED_ATTEMPTS = 3
+_send_attempts: dict[int, int] = {}
+
+
+def record_unattempted(news_id: int) -> int:
+    """Count one cycle in which the broadcast could not be attempted."""
+    _send_attempts[news_id] = _send_attempts.get(news_id, 0) + 1
+    return _send_attempts[news_id]
+
+
+def forget_attempts(news_id: int) -> None:
+    """Drop a row's retry budget once it reaches a state it cannot leave."""
+    _send_attempts.pop(news_id, None)
+
+
+def reset_send_attempts() -> None:
+    """Clear every retry budget (test helper)."""
+    _send_attempts.clear()
+
+
+# How far back !newslist looks for failures. Older than this is history, not a
+# to-do: nobody re-sends last month's news, and an unbounded list would grow
+# until it crowded the pending rows off the message.
+_FAILED_WINDOW_DAYS = 7
+
+
+def get_failed(limit: int = 10, days: int = _FAILED_WINDOW_DAYS) -> list[dict]:
+    """Recent rows whose broadcast reached nobody, newest first.
+
+    'failed' is terminal - get_due only looks at 'pending', so the scheduler
+    never touches these again. Without somewhere to see them, a send that
+    reached zero subscribers left no trace an operator would ever look at.
+    """
+    _ensure_table()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    conn = get_bbs_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, content, scheduled_at FROM scheduled_news "
+            "WHERE status = 'failed' AND scheduled_at >= ? "
+            "ORDER BY scheduled_at DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def get_due(now_utc: datetime) -> list[dict]:
     _ensure_table()
     conn = get_bbs_db()
@@ -217,7 +294,58 @@ def set_status_if_pending(news_id: int, status: str) -> bool:
         )
         return cur.rowcount == 1
 
-    return db_write(_w)
+    changed = db_write(_w)
+    if changed:
+        forget_attempts(news_id)
+    return changed
+
+
+def cancel_cancellable(news_id: int) -> bool:
+    """Cancel a row that has not gone out: 'pending' or 'failed'.
+
+    'failed' belongs here because it is terminal - the scheduler never retries
+    it - so without this the row sat in !newslist forever with no way to clear
+    it. 'sending' is deliberately excluded: that row may be mid-broadcast, and
+    force_release is the explicit, separately-worded escape hatch for it.
+    """
+
+    def _w(conn):
+        cur = conn.execute(
+            "UPDATE scheduled_news SET status = 'cancelled' "
+            "WHERE id = ? AND status IN ('pending', 'failed')",
+            (news_id,),
+        )
+        return cur.rowcount == 1
+
+    _ensure_table()
+    cancelled = db_write(_w)
+    if cancelled:
+        forget_attempts(news_id)
+    return cancelled
+
+
+def force_release(news_id: int) -> bool:
+    """Flip a row stuck in 'sending' to 'cancelled'. True iff a row moved.
+
+    A crash between claim_for_send and mark_status strands the row: get_due only
+    looks at 'pending', so nothing ever clears it and every boot re-warns about
+    it. Deliberately separate from the plain cancel path, which must never touch
+    a row that could still be mid-broadcast; the operator asks for this one
+    explicitly, after checking whether the news actually went out.
+    """
+
+    def _w(conn):
+        cur = conn.execute(
+            "UPDATE scheduled_news SET status = 'cancelled' WHERE id = ? AND status = 'sending'",
+            (news_id,),
+        )
+        return cur.rowcount == 1
+
+    _ensure_table()
+    released = db_write(_w)
+    if released:
+        forget_attempts(news_id)
+    return released
 
 
 def mark_status(news_id: int, status: str):
@@ -228,46 +356,123 @@ def mark_status(news_id: int, status: str):
     db_write(_w)
 
 
+# Async wrappers. Everything above is synchronous sqlite that can sleep for
+# seconds while db_write retries SQLITE_BUSY; awaited straight from a handler it
+# froze the polling loop. The sync originals stay for tests and for callers that
+# are not on the event loop.
+
+
+async def a_get_pending() -> list[dict]:
+    return await asyncio.to_thread(get_pending)
+
+
+async def a_get_due(now_utc: datetime) -> list[dict]:
+    return await asyncio.to_thread(get_due, now_utc)
+
+
+async def a_get_failed(limit: int = 10) -> list[dict]:
+    return await asyncio.to_thread(get_failed, limit)
+
+
+async def a_cancel_cancellable(news_id: int) -> bool:
+    return await asyncio.to_thread(cancel_cancellable, news_id)
+
+
+async def a_save_scheduled(content: str, scheduled_at_utc: datetime) -> int:
+    return await asyncio.to_thread(save_scheduled, content, scheduled_at_utc)
+
+
+async def a_claim_for_send(news_id: int) -> bool:
+    return await asyncio.to_thread(claim_for_send, news_id)
+
+
+async def a_mark_status(news_id: int, status: str) -> None:
+    return await asyncio.to_thread(mark_status, news_id, status)
+
+
+async def a_set_status_if_pending(news_id: int, status: str) -> bool:
+    return await asyncio.to_thread(set_status_if_pending, news_id, status)
+
+
+async def a_get_stale_sending(older_than_utc: datetime) -> list[dict]:
+    return await asyncio.to_thread(get_stale_sending, older_than_utc)
+
+
+async def a_force_release(news_id: int) -> bool:
+    return await asyncio.to_thread(force_release, news_id)
+
+
 @admin_only
 async def cmd_newslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """!newslist — show pending scheduled news."""
-    rows = get_pending()
-    if not rows:
+    """!newslist — show pending scheduled news, plus recent failures.
+
+    A 'failed' row is terminal, so listing it here is the only place an
+    operator learns that a scheduled send reached nobody.
+    """
+    rows = await a_get_pending()
+    failed = await a_get_failed()
+    if not rows and not failed:
         await update.message.reply_text("예약된 뉴스 없음.")
         return
     lines = [f"📅 *예약된 뉴스 {len(rows)}건*\n"]
     for r in rows:
         dt_utc = ensure_utc(datetime.fromisoformat(r["scheduled_at"]))
         dt_kst = dt_utc.astimezone(KST)
-        preview = r["content"][:40] + ("..." if len(r["content"]) > 40 else "")
+        preview = md_escape(r["content"][:40]) + ("..." if len(r["content"]) > 40 else "")
         lines.append(f"`[{r['id']}]` {dt_kst.strftime('%m/%d %H:%M')} KST\n  {preview}")
+    if failed:
+        lines.append(f"\n*FAILED - reached nobody ({len(failed)})*")
+        for r in failed:
+            dt_kst = ensure_utc(datetime.fromisoformat(r["scheduled_at"])).astimezone(KST)
+            preview = md_escape(r["content"][:40]) + ("..." if len(r["content"]) > 40 else "")
+            lines.append(f"`[{r['id']}]` {dt_kst.strftime('%m/%d %H:%M')} KST\n  {preview}")
     lines.append("\n취소: `!newscc <ID>`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await safe_reply(update.message, "\n".join(lines))
 
 
 @admin_only
 async def cmd_newscc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """!newscc <id> — cancel a scheduled news item."""
+    """!newscc <id> [force] — cancel a scheduled news item.
+
+    The plain form clears a row that never went out: 'pending', or 'failed'
+    once the operator has read the failure. `force` is the separate escape
+    hatch for a row stranded in 'sending' by a crash mid-broadcast.
+    """
     text = (update.message.text or "").strip()
     arg = text[len("!newscc") :].strip()
-    if not arg or not arg.isdigit():
-        await update.message.reply_text(
-            "Usage: `!newscc <ID>`\n목록 확인: `!newslist`", parse_mode="Markdown"
+    parts = arg.split()
+    news_id = parse_int_arg(parts[0]) if parts else None
+    if news_id is None:
+        await safe_reply(
+            update.message, "Usage: `!newscc <ID>`\n목록 확인: `!newslist`", parse_mode="Markdown"
         )
         return
-    news_id = int(arg)
-    conn = get_bbs_db()
-    try:
-        row = conn.execute(
-            "SELECT id, content, scheduled_at FROM scheduled_news WHERE id = ? AND status = 'pending'",
+
+    if len(parts) > 1 and parts[1].lower() == "force":
+        if await a_force_release(news_id):
+            await safe_reply(
+                update.message,
+                f"🔓 `[{news_id}]` 강제 해제: 'sending' → 'cancelled'. "
+                "재예약 전에 실제 발송 여부를 먼저 확인하세요.",
+            )
+        else:
+            await safe_reply(
+                update.message, f"ID {news_id}: 'sending' 상태로 멈춘 예약이 없습니다."
+            )
+        return
+
+    # Off the event loop: opening the shared bbs.db can block on a BBS-side write.
+    row = await _cfg.db_read_async(
+        lambda conn: conn.execute(
+            "SELECT id, content, scheduled_at FROM scheduled_news "
+            "WHERE id = ? AND status IN ('pending', 'failed')",
             (news_id,),
         ).fetchone()
-    finally:
-        conn.close()
+    )
     if not row:
         await update.message.reply_text(f"ID {news_id} 예약 없음 (이미 발송됐거나 취소됨).")
         return
-    if not set_status_if_pending(news_id, "cancelled"):
+    if not await a_cancel_cancellable(news_id):
         # The scheduler claimed it between the SELECT above and this UPDATE.
         await update.message.reply_text(
             f"⚠️ ID {news_id} 는 방금 발송이 시작돼 취소하지 못했습니다."
@@ -276,8 +481,9 @@ async def cmd_newscc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     dt_utc = ensure_utc(datetime.fromisoformat(row["scheduled_at"]))
     dt_kst = dt_utc.astimezone(KST)
-    preview = row["content"][:40]
-    await update.message.reply_text(
+    preview = md_escape(row["content"][:40])
+    await safe_reply(
+        update.message,
         f"✅ 예약 취소됨 `[{news_id}]`\n📅 {dt_kst.strftime('%m/%d %H:%M')} KST\n📝 {preview}",
         parse_mode="Markdown",
     )
