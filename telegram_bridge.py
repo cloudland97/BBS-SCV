@@ -94,12 +94,7 @@ async def _loop_monitor_task(app):
 
 
 def _send_status(news_id, ok_count: int, fail_count: int) -> str:
-    """Status to record for a broadcast that returned (ok_count, fail_count).
-
-    'sent' if reached somebody; 'failed' if all attempted recipients failed;
-    'pending' (up to MAX_UNATTEMPTED_ATTEMPTS times) if nothing was attempted
-    at all (no token/no subscribers), then 'failed'. Spends the retry budget as a side effect.
-    """
+    """(ok, fail) -> 'sent' / 'failed' / 'pending' (the (0,0) case, up to MAX_UNATTEMPTED_ATTEMPTS)."""
     if ok_count:
         _cns.forget_attempts(news_id)
         return "sent"
@@ -536,9 +531,7 @@ async def _maintenance_task():
 def _pid_alive(pid: int) -> bool:
     """True if a process with this pid exists.
 
-    os.kill(pid, 0) is NOT usable on Windows: CPython maps it to TerminateProcess.
-    Uses WaitForSingleObject, not GetExitCodeProcess, since STILL_ACTIVE (259) is
-    indistinguishable from a real exit code.
+    No os.kill(pid, 0) on Windows (TerminateProcess); exit code 259 is indistinguishable from STILL_ACTIVE.
     """
     if pid <= 0:
         return False
@@ -651,9 +644,7 @@ def _lock_holder_state(pid: int) -> str:
 def acquire_single_instance(pid_path: Path = None) -> bool:
     """Claim the bridge pid file. False means a live bridge already holds it.
 
-    Two pollers on one token make Telegram reject getUpdates with 409 Conflict.
-    Liveness alone does not justify refusing to start — a wrong refusal can
-    leave no bridge running (start_bot.bat ends in `pause`), so every uncertain case starts the bridge.
+    When unsure, start; only a pid whose command line names this script blocks.
     """
     pid_path = pid_path or (LOG_DIR / "bridge.pid")
     try:

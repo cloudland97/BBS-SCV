@@ -334,8 +334,7 @@ async def _broadcast_bbnews_auto(
 ) -> tuple[int, int]:
     """Broadcast bongnews without an Update object (scheduled/automated sends).
 
-    Returns (ok_count, fail_count); (0, 0) means nothing was attempted (no
-    token/no subscribers), so the caller must not record 'sent'. Never raises on a delivery problem.
+    Returns (ok, fail). (0,0) = not attempted, must not be recorded as 'sent'. Never raises for delivery problems.
     """
     token = await _get_discord_token_async()
     if not token:

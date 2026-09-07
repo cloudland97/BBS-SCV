@@ -201,11 +201,7 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _events_cutoff(days: int) -> str:
-    """Lower bound for a subscription_events.ts window, as a comparable string.
-
-    Matches sqlite's stored format "YYYY-MM-DD HH:MM:SS" exactly — isoformat()'s
-    "T" separator sorts above " " and would break the lexical comparison.
-    """
+    """ts is "YYYY-MM-DD HH:MM:SS"; isoformat()'s "T" sorts after " ", dropping the boundary day."""
     return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 

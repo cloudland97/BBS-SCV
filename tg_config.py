@@ -65,9 +65,7 @@ log = logging.getLogger("telegram_bridge")
 
 # -- Secret redaction --
 
-# A Telegram bot token travels in the API path (api.telegram.org/bot<TOKEN>/...);
-# any library that logs a request URL or an exception carrying one can leak it,
-# so redact at the handler, not the call site.
+# The bot token sits in the API path; mask in the handler, not at call sites.
 _TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 _TOKEN_MARKER = "bot<redacted>"
 
