@@ -11,22 +11,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import discord_helpers as dh
+from tests.fakes import FakeResp as _FakeResp
 from tg_utils import split_message
-
-
-class _FakeResp:
-    def __init__(self, status, payload=None):
-        self.status = status
-        self._payload = payload or {}
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def json(self):
-        return self._payload
 
 
 class _FakeSession:

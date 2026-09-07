@@ -16,52 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 import discord_helpers as dh
-
-
-class _FakeResp:
-    def __init__(self, status, payload=None, headers=None):
-        self.status = status
-        self._payload = payload if payload is not None else {}
-        self.headers = headers or {}
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def json(self):
-        return self._payload
-
-
-class _ScriptedSession:
-    """Session that replays a queued status per message POST.
-
-    Channel-open always succeeds unless `channel_statuses` is supplied.
-    """
-
-    def __init__(self, message_statuses=None, channel_statuses=None):
-        self.message_statuses = list(message_statuses or [])
-        self.channel_statuses = list(channel_statuses or [])
-        self.message_bodies = []
-        self.message_forms = []
-        self.channel_calls = 0
-
-    def post(self, url, json=None, data=None, headers=None):
-        if url.endswith("/users/@me/channels"):
-            self.channel_calls += 1
-            status = self.channel_statuses.pop(0) if self.channel_statuses else 200
-            if status == 200:
-                return _FakeResp(200, {"id": "chan1"})
-            return _FakeResp(status, {"retry_after": 0.01}, {"Retry-After": "0.01"})
-        if json is not None:
-            self.message_bodies.append(json)
-        else:
-            self.message_forms.append(data)
-        status = self.message_statuses.pop(0) if self.message_statuses else 200
-        if status == 429:
-            return _FakeResp(429, {"retry_after": 0.01}, {"Retry-After": "0.01"})
-        return _FakeResp(status, {})
+from tests.fakes import FakeBot as _FakeBot
+from tests.fakes import FakeResp as _FakeResp
+from tests.fakes import ScriptedSession as _ScriptedSession
 
 
 @pytest.fixture
@@ -156,17 +113,6 @@ class TestConcurrencyCap:
         results = asyncio.run(dh._send_all(None, "tok", list(range(40)), "hi", None, None))
         assert results == [True] * 40
         assert live["peak"] <= dh._DM_CONCURRENCY
-
-
-class _FakeBot:
-    def __init__(self, fail=False):
-        self.sent = []
-        self.fail = fail
-
-    async def send_message(self, chat_id, text, **_kw):
-        if self.fail:
-            raise RuntimeError("telegram is down")
-        self.sent.append(text)
 
 
 class TestBlockingWorkIsOffTheLoop:

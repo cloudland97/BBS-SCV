@@ -18,20 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import telegram_bridge as tb
 import tg_utils
+from tests.fakes import FakeMessage as _FakeMessage
 from tg_config import ALLOWED_USER_ID
-
-
-class _FakeMessage:
-    def __init__(self, text=None):
-        self.text = text
-        self.photo = None
-        self.video = None
-        self.document = None
-        self.caption = None
-        self.replies = []
-
-    async def reply_text(self, text, **_kw):
-        self.replies.append(text)
 
 
 class _NonMessageUpdate:

@@ -16,27 +16,8 @@ import pytest
 
 import cmd_news_schedule as cns
 import telegram_bridge as tb
+from tests.fakes import FakeUpdate as _FakeUpdate
 from tg_config import ALLOWED_USER_ID
-
-
-class _FakeMessage:
-    def __init__(self, text):
-        self.text = text
-        self.photo = None
-        self.video = None
-        self.document = None
-        self.caption = None
-        self.replies = []
-
-    async def reply_text(self, text, **_kw):
-        self.replies.append(text)
-
-
-class _FakeUpdate:
-    def __init__(self, text, user_id):
-        self.message = _FakeMessage(text)
-        self.effective_user = type("U", (), {"id": user_id})()
-        self.effective_chat = type("C", (), {"id": user_id})()
 
 
 def _route(monkeypatch, text, user_id=ALLOWED_USER_ID):

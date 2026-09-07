@@ -335,20 +335,6 @@ async def fetch_rows_async(sql: str, params: tuple = ()) -> list:
     return await db_read_async(lambda conn: conn.execute(sql, params).fetchall())
 
 
-# Slash commands to track for !st
-TRACKED_COMMANDS = [
-    "bbtt",
-    "bbf1",
-    "bbmk",
-    "bbark",
-    "bbup",
-    "bbs",
-    "bbday",
-    "bbfb",
-    "bbpf",
-    "bbbg",
-]
-
 # Loop monitor thresholds (minutes)
 LOOP_ALERT_THRESHOLDS = {
     "market_loop": 120,

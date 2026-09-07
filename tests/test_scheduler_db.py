@@ -21,7 +21,8 @@ import cmd_subscribers as cs
 import discord_helpers as dh
 import telegram_bridge as tb
 import tg_config
-from tg_config import ALLOWED_USER_ID
+from tests.fakes import FakeBot as _FakeBot
+from tests.fakes import FakeUpdate as _FakeUpdate
 
 UTC = timezone.utc
 # str.isdigit() is True for this, int() rejects it. Written as an escape so
@@ -29,37 +30,9 @@ UTC = timezone.utc
 SUPERSCRIPT_TWO = "\u00b2"
 
 
-class _FakeBot:
-    def __init__(self):
-        self.sent = []
-
-    async def send_message(self, chat_id, text, **_kw):
-        self.sent.append(text)
-
-
 class _FakeApp:
     def __init__(self):
         self.bot = _FakeBot()
-
-
-class _FakeMessage:
-    def __init__(self, text):
-        self.text = text
-        self.photo = None
-        self.video = None
-        self.document = None
-        self.caption = None
-        self.replies = []
-
-    async def reply_text(self, text, **_kw):
-        self.replies.append(text)
-
-
-class _FakeUpdate:
-    def __init__(self, text, user_id=ALLOWED_USER_ID):
-        self.message = _FakeMessage(text)
-        self.effective_user = type("U", (), {"id": user_id})()
-        self.effective_chat = type("C", (), {"id": user_id})()
 
 
 @pytest.fixture
