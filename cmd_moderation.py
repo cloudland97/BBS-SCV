@@ -64,65 +64,51 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time_params = ()
         period_label = ""
 
-    # Opened on the event loop. Bounded exposure: these are plain SELECTs
-    # with no retry sleep, so the worst stall is get_bbs_db's 4s busy
-    # timeout. Every write, and the multi-query !list/!hp/!newscc paths, go
-    # through db_write_async/db_read_async instead.
-    conn = _cfg.open_db()
-    if conn is None:
+    if not _cfg.BBS_DB_PATH.exists():
         await update.message.reply_text("DB not found.")
         return
 
     uid = parse_user_id(arg)
-    try:
-        if uid is not None:
-            rows = conn.execute(
-                "SELECT command, COUNT(*) as cnt FROM command_usage"
-                " WHERE user_id = ?" + time_clause + " GROUP BY command ORDER BY cnt DESC",
-                (uid, *time_params),
-            ).fetchall()
-            # Release the shared DB before any HTTP await: this handler used to
-            # keep the connection open across a 15s Discord username lookup.
-            conn.close()
-            if not rows:
-                await update.message.reply_text(f"No usage data for {uid}")
-                return
-            names = await _dh._fetch_discord_usernames([str(uid)])
-            name = md_escape(names.get(str(uid), str(uid)))
-            total = sum(r["cnt"] for r in rows)
-            lines = [f"*{name}* (`{uid}`) — {total}회{period_label}\n"]
-            for r in rows:
-                lines.append(f"  `{r['command']:<8}` {r['cnt']}회")
-            await _utils.safe_reply(update.message, "\n".join(lines))
-        else:
-            rows = conn.execute(
-                "SELECT user_id, command, COUNT(*) as cnt FROM command_usage"
-                " WHERE 1=1"
-                + time_clause
-                + " GROUP BY user_id, command ORDER BY user_id, cnt DESC",
-                time_params,
-            ).fetchall()
-            conn.close()
-            if not rows:
-                await update.message.reply_text("No usage data yet.")
-                return
+    if uid is not None:
+        rows = await _cfg.fetch_rows_async(
+            "SELECT command, COUNT(*) as cnt FROM command_usage"
+            " WHERE user_id = ?" + time_clause + " GROUP BY command ORDER BY cnt DESC",
+            (uid, *time_params),
+        )
+        if not rows:
+            await update.message.reply_text(f"No usage data for {uid}")
+            return
+        names = await _dh._fetch_discord_usernames([str(uid)])
+        name = md_escape(names.get(str(uid), str(uid)))
+        total = sum(r["cnt"] for r in rows)
+        lines = [f"*{name}* (`{uid}`) — {total}회{period_label}\n"]
+        for r in rows:
+            lines.append(f"  `{r['command']:<8}` {r['cnt']}회")
+        await _utils.safe_reply(update.message, "\n".join(lines))
+    else:
+        rows = await _cfg.fetch_rows_async(
+            "SELECT user_id, command, COUNT(*) as cnt FROM command_usage"
+            " WHERE 1=1" + time_clause + " GROUP BY user_id, command ORDER BY user_id, cnt DESC",
+            time_params,
+        )
+        if not rows:
+            await update.message.reply_text("No usage data yet.")
+            return
 
-            user_data: dict[str, list] = {}
-            for r in rows:
-                uid_str = str(r["user_id"])
-                user_data.setdefault(uid_str, []).append((r["command"], r["cnt"]))
+        user_data: dict[str, list] = {}
+        for r in rows:
+            uid_str = str(r["user_id"])
+            user_data.setdefault(uid_str, []).append((r["command"], r["cnt"]))
 
-            user_totals = {uid: sum(c for _, c in cmds) for uid, cmds in user_data.items()}
-            sorted_uids = sorted(user_data, key=lambda u: user_totals[u], reverse=True)
+        user_totals = {uid: sum(c for _, c in cmds) for uid, cmds in user_data.items()}
+        sorted_uids = sorted(user_data, key=lambda u: user_totals[u], reverse=True)
 
-            names = await _dh._fetch_discord_usernames(sorted_uids)
-            lines = [f"*📊 Command Usage Stats{period_label}*\n"]
-            for uid_str in sorted_uids:
-                name = md_escape(names.get(uid_str, uid_str))
-                total = user_totals[uid_str]
-                cmds = user_data[uid_str]
-                cmd_str = "  ".join(f"`{cmd}` ×{cnt}" for cmd, cnt in cmds)
-                lines.append(f"👤 *{name}* (`{uid_str}`) — 총 {total}회\n  {cmd_str}")
-            await _utils.safe_reply(update.message, "\n\n".join(lines))
-    finally:
-        conn.close()
+        names = await _dh._fetch_discord_usernames(sorted_uids)
+        lines = [f"*📊 Command Usage Stats{period_label}*\n"]
+        for uid_str in sorted_uids:
+            name = md_escape(names.get(uid_str, uid_str))
+            total = user_totals[uid_str]
+            cmds = user_data[uid_str]
+            cmd_str = "  ".join(f"`{cmd}` ×{cnt}" for cmd, cnt in cmds)
+            lines.append(f"👤 *{name}* (`{uid_str}`) — 총 {total}회\n  {cmd_str}")
+        await _utils.safe_reply(update.message, "\n\n".join(lines))

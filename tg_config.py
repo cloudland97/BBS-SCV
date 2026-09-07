@@ -321,14 +321,18 @@ def db_read(fn):
 
 
 async def db_read_async(fn):
-    """Await db_read off the event loop (see db_write_async).
-
-    Not every read goes through here: !ud, !st and !se still open their
-    connection inline, which is safe because they issue plain SELECTs with no
-    retry sleep. Anything that writes, or that runs several queries in a row,
-    must use these wrappers.
-    """
+    """Await db_read off the event loop (see db_write_async)."""
     return await asyncio.to_thread(db_read, fn)
+
+
+async def fetch_rows_async(sql: str, params: tuple = ()) -> list:
+    """Run one SELECT off the event loop on a fresh connection and return the rows.
+
+    Every handler read goes through here (or db_read_async), so a BBS-side
+    write holding the shared bbs.db can no longer stall polling for the
+    connect timeout.
+    """
+    return await db_read_async(lambda conn: conn.execute(sql, params).fetchall())
 
 
 # Slash commands to track for !st

@@ -198,12 +198,7 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!ud [userID] — View stored user DMs. No arg = summary, with arg = messages."""
-    # Opened on the event loop. Bounded exposure: these are plain SELECTs
-    # with no retry sleep, so the worst stall is get_bbs_db's 4s busy
-    # timeout. Every write, and the multi-query !list/!hp/!newscc paths, go
-    # through db_write_async/db_read_async instead.
-    conn = _cfg.open_db()
-    if conn is None:
+    if not _cfg.BBS_DB_PATH.exists():
         await update.message.reply_text("DB not found.")
         return
 
@@ -211,47 +206,40 @@ async def cmd_dm_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = text[len("!ud") :].strip()
     uid = parse_user_id(arg) if arg else None
 
-    try:
-        if uid is not None:
-            rows = conn.execute(
-                "SELECT content, created_at FROM user_dm"
-                " WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
-                (uid,),
-            ).fetchall()
-            # Release the shared DB before any HTTP await: this handler used to
-            # keep the connection open across a 15s Discord username lookup.
-            conn.close()
-            if not rows:
-                await update.message.reply_text(f"No DMs from {uid}")
-                return
-            names = await _dh._fetch_discord_usernames([str(uid)])
-            name = md_escape(names.get(str(uid), str(uid)))
-            lines = [f"*{name}* (`{uid}`) DM ({len(rows)})\n"]
-            for r in rows:
-                ts = _to_kst(r["created_at"])
-                content = r["content"][:80]
-                lines.append(f"`{ts}` {content}")
-            await _utils.safe_reply(update.message, "\n".join(lines))
-        else:
-            rows = conn.execute(
-                "SELECT user_id, COUNT(*) as cnt, MAX(created_at) as last_at"
-                " FROM user_dm GROUP BY user_id ORDER BY last_at DESC"
-            ).fetchall()
-            conn.close()
-            if not rows:
-                await update.message.reply_text("No DMs stored.")
-                return
-            all_uids = [str(r["user_id"]) for r in rows]
-            names = await _dh._fetch_discord_usernames(all_uids)
-            lines = ["*User DM Log*\n"]
-            for r in rows:
-                uid_str = str(r["user_id"])
-                name = md_escape(names.get(uid_str, uid_str))
-                last = _to_kst(r["last_at"]) if r["last_at"] else "?"
-                lines.append(f"*{name}* (`{uid_str}`) — {r['cnt']}건 (last: {last})")
-            await _utils.safe_reply(update.message, "\n".join(lines))
-    finally:
-        conn.close()
+    if uid is not None:
+        rows = await _cfg.fetch_rows_async(
+            "SELECT content, created_at FROM user_dm"
+            " WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            (uid,),
+        )
+        if not rows:
+            await update.message.reply_text(f"No DMs from {uid}")
+            return
+        names = await _dh._fetch_discord_usernames([str(uid)])
+        name = md_escape(names.get(str(uid), str(uid)))
+        lines = [f"*{name}* (`{uid}`) DM ({len(rows)})\n"]
+        for r in rows:
+            ts = _to_kst(r["created_at"])
+            content = r["content"][:80]
+            lines.append(f"`{ts}` {content}")
+        await _utils.safe_reply(update.message, "\n".join(lines))
+    else:
+        rows = await _cfg.fetch_rows_async(
+            "SELECT user_id, COUNT(*) as cnt, MAX(created_at) as last_at"
+            " FROM user_dm GROUP BY user_id ORDER BY last_at DESC"
+        )
+        if not rows:
+            await update.message.reply_text("No DMs stored.")
+            return
+        all_uids = [str(r["user_id"]) for r in rows]
+        names = await _dh._fetch_discord_usernames(all_uids)
+        lines = ["*User DM Log*\n"]
+        for r in rows:
+            uid_str = str(r["user_id"])
+            name = md_escape(names.get(uid_str, uid_str))
+            last = _to_kst(r["last_at"]) if r["last_at"] else "?"
+            lines.append(f"*{name}* (`{uid_str}`) — {r['cnt']}건 (last: {last})")
+        await _utils.safe_reply(update.message, "\n".join(lines))
 
 
 @admin_only

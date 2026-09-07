@@ -293,20 +293,15 @@ class TestConnectionReleasedBeforeHttp:
 
     def test_connection_closes_before_the_username_lookup(self, list_db, monkeypatch):
         order = []
-        real_open = tg_config.open_db
+        real_read = tg_config.db_read
 
-        class _Tracked:
-            def __init__(self, inner):
-                self._inner = inner
-
-            def execute(self, *a, **kw):
-                return self._inner.execute(*a, **kw)
-
-            def close(self):
+        def _tracked_read(fn):
+            try:
+                return real_read(fn)
+            finally:
                 order.append("db-close")
-                self._inner.close()
 
-        monkeypatch.setattr(cd._cfg, "open_db", lambda *a, **kw: _Tracked(real_open()))
+        monkeypatch.setattr(tg_config, "db_read", _tracked_read)
 
         async def _lookup(uids):
             order.append("http")
@@ -318,6 +313,26 @@ class TestConnectionReleasedBeforeHttp:
         asyncio.run(cd.cmd_dm_log(update, None))
         assert order[0] == "db-close"
         assert "http" in order
+
+    def test_reads_run_off_the_event_loop(self, list_db, monkeypatch):
+        threads = []
+        real_read = tg_config.db_read
+
+        def _tracked_read(fn):
+            import threading
+
+            threads.append(threading.current_thread() is threading.main_thread())
+            return real_read(fn)
+
+        monkeypatch.setattr(tg_config, "db_read", _tracked_read)
+
+        async def _lookup(uids):
+            return {}
+
+        monkeypatch.setattr(dh, "_fetch_discord_usernames", _lookup)
+        for text, handler in (("!ud 7", cd.cmd_dm_log), ("!ud", cd.cmd_dm_log)):
+            asyncio.run(handler(_FakeUpdate(text), None))
+        assert threads and not any(threads)
 
 
 # =========================================================

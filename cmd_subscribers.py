@@ -238,53 +238,44 @@ async def cmd_sub_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if candidate is not None and len(str(candidate)) > 4:
                 uid = candidate
 
-    # Opened on the event loop. Bounded exposure: these are plain SELECTs
-    # with no retry sleep, so the worst stall is get_bbs_db's 4s busy
-    # timeout. Every write, and the multi-query !list/!hp/!newscc paths, go
-    # through db_write_async/db_read_async instead.
-    conn = _cfg.open_db()
-    if conn is None:
+    if not _cfg.BBS_DB_PATH.exists():
         await update.message.reply_text("DB not found.")
         return
 
-    try:
-        cutoff = _events_cutoff(days)
-        if uid:
-            rows = conn.execute(
-                "SELECT source, action, ts FROM subscription_events"
-                " WHERE user_id = ? AND ts > ? ORDER BY ts DESC LIMIT 50",
-                (uid, cutoff),
-            ).fetchall()
-            # Release the shared DB before the HTTP await; the summary branch
-            # below needs the connection, so only this path closes early.
-            conn.close()
-            names = await _dh._fetch_discord_usernames([str(uid)])
-            name = md_escape(names.get(str(uid), str(uid)))
-            lines = [f"*{name}* 구독 이벤트 (최근 {days}일)\n"]
-            for r in rows:
-                ts = _to_kst(r["ts"])
-                icon = "✅" if r["action"] == "subscribe" else "❌"
-                lines.append(f"{icon} `{r['source']:<8}` {ts}")
-        else:
-            rows = conn.execute(
-                "SELECT source, action, COUNT(*) as cnt FROM subscription_events"
-                " WHERE ts > ? GROUP BY source, action ORDER BY source, action",
-                (cutoff,),
-            ).fetchall()
-            lines = [f"📊 *구독 이벤트* (최근 {days}일)\n"]
-            cur_src = None
-            for r in rows:
-                if r["source"] != cur_src:
-                    cur_src = r["source"]
-                    lines.append(f"*{cur_src}*")
-                icon = "✅" if r["action"] == "subscribe" else "❌"
-                lines.append(f"  {icon} {r['action']}: {r['cnt']}건")
-            lines.append("")
-            total = conn.execute(
+    cutoff = _events_cutoff(days)
+    if uid:
+        rows = await _cfg.fetch_rows_async(
+            "SELECT source, action, ts FROM subscription_events"
+            " WHERE user_id = ? AND ts > ? ORDER BY ts DESC LIMIT 50",
+            (uid, cutoff),
+        )
+        names = await _dh._fetch_discord_usernames([str(uid)])
+        name = md_escape(names.get(str(uid), str(uid)))
+        lines = [f"*{name}* 구독 이벤트 (최근 {days}일)\n"]
+        for r in rows:
+            ts = _to_kst(r["ts"])
+            icon = "✅" if r["action"] == "subscribe" else "❌"
+            lines.append(f"{icon} `{r['source']:<8}` {ts}")
+    else:
+        rows = await _cfg.fetch_rows_async(
+            "SELECT source, action, COUNT(*) as cnt FROM subscription_events"
+            " WHERE ts > ? GROUP BY source, action ORDER BY source, action",
+            (cutoff,),
+        )
+        lines = [f"📊 *구독 이벤트* (최근 {days}일)\n"]
+        cur_src = None
+        for r in rows:
+            if r["source"] != cur_src:
+                cur_src = r["source"]
+                lines.append(f"*{cur_src}*")
+            icon = "✅" if r["action"] == "subscribe" else "❌"
+            lines.append(f"  {icon} {r['action']}: {r['cnt']}건")
+        lines.append("")
+        total = (
+            await _cfg.fetch_rows_async(
                 "SELECT COUNT(DISTINCT user_id) FROM subscription_events WHERE ts > ?", (cutoff,)
-            ).fetchone()[0]
-            lines.append(f"관련 유저: {total}명")
-    finally:
-        conn.close()
+            )
+        )[0][0]
+        lines.append(f"관련 유저: {total}명")
 
     await _utils.safe_reply(update.message, "\n".join(lines))
