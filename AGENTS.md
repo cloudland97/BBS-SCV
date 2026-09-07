@@ -75,6 +75,8 @@ Always convert stored UTC timestamps to KST before displaying them.
 
 ## 코딩 / 수정 규칙
 
+- 주석/독스트링 3원칙: ①코드가 표현 못하는 외부 사실·불변조건만 1–2줄 ②감사 ID·날짜·"used to"·리뷰어 대화 금지(이력은 git/docs에) ③같은 근거는 정식 위치 한 곳에, 나머지는 그 함수 이름을 가리키는 한 줄로. 공개 함수 독스트링은 ≤3줄, private 헬퍼는 ≤1줄 또는 생략.
+
 Do not add button-based UI here.
 
 재시작 로직 수정 시:

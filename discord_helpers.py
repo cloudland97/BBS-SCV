@@ -38,11 +38,7 @@ def _get_discord_token() -> Optional[str]:
 
 
 async def _get_discord_token_async() -> Optional[str]:
-    """Read the Discord token off the event loop.
-
-    A blocking file read is fast until the file lives on a stalled network or
-    encrypted volume, at which point it stalls Telegram polling too.
-    """
+    """Read the Discord token off the event loop — a blocking read stalls Telegram polling if the file lives on a stalled network/encrypted volume."""
     return await asyncio.to_thread(_get_discord_token)
 
 
@@ -117,11 +113,7 @@ def _get_bongnews_subscribers():
 
 
 def _save_latest(content: str) -> None:
-    """Write the newest bongnews body for the BBS feed embed to pick up.
-
-    Best-effort: the broadcast itself is what matters, so a write failure is
-    logged and the send continues.
-    """
+    """Write the newest bongnews body for the BBS feed embed to pick up (best-effort — a write failure is logged, not fatal)."""
     try:
         latest_path = DISCORD_DATA_PATH / "bongnews_latest.txt"
         latest_path.write_text(content.strip(), encoding="utf-8")
@@ -135,11 +127,7 @@ async def _save_latest_async(content: str) -> None:
 
 
 async def _get_bongnews_subscribers_async():
-    """Read the subscriber list off the event loop.
-
-    This opens the shared bbs.db, whose connect blocks for up to the 4s busy
-    timeout while the Discord bot holds a write lock.
-    """
+    """Read the subscriber list off the event loop — opening bbs.db can block up to the 4s busy timeout while the Discord bot holds a write lock."""
     return await asyncio.to_thread(_get_bongnews_subscribers)
 
 
@@ -147,9 +135,8 @@ async def _get_bongnews_subscribers_async():
 # which previously failed the entire broadcast for any long news item.
 _DISCORD_CONTENT_LIMIT = 2000
 
-# A broadcast used to fire every DM at once, which is what earns a 429 in the
-# first place. Four in flight keeps a large subscriber list well inside
-# Discord's per-route budget while staying far faster than serial sending.
+# Four in flight keeps a large subscriber list well inside Discord's per-route
+# budget while staying far faster than serial sending.
 _DM_CONCURRENCY = 4
 
 # One retry: a 429 usually clears within its Retry-After, and a second failure
@@ -182,10 +169,8 @@ async def _retry_after(response) -> float:
 async def _post_message(session, url, headers, *, json_body=None, data=None) -> int:
     """POST a Discord message, retrying once on 429. Returns the status code.
 
-    Returning the status instead of a bool is the point: the old code collapsed
-    429 (throttled, retryable), 403 (recipient blocks DMs) and 500 into one
-    silent False, so a broadcast that failed for every subscriber looked exactly
-    like one that succeeded.
+    Returning the status (not a bool) lets callers distinguish 429/403/500
+    instead of collapsing them into one meaning.
     """
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
@@ -299,12 +284,8 @@ async def _send_all(session, token, subscribers, msg_text, file_bytes, filename)
 
 
 async def _send_summary(bot, chat_id, text) -> None:
-    """Send an operator summary, absorbing any Telegram-side failure.
-
-    A raised summary error used to propagate out of the scheduled broadcast,
-    where the caller read it as "the send failed" and reverted an
-    already-broadcast row to 'pending' - so the news went out twice.
-    """
+    """Send an operator summary, absorbing any Telegram-side failure — a raised
+    error here must never look like "the broadcast failed" to the caller."""
     try:
         await bot.send_message(chat_id=chat_id, text=text)
     except Exception as e:
@@ -353,12 +334,8 @@ async def _broadcast_bbnews_auto(
 ) -> tuple[int, int]:
     """Broadcast bongnews without an Update object (scheduled/automated sends).
 
-    Returns (ok_count, fail_count). (0, 0) means nothing was even attempted - no
-    Discord token, or no subscribers - so the caller must not record the row as
-    'sent'. Nothing in here raises on a delivery problem: the Telegram summary
-    is sent through _send_summary, because an exception escaping this function
-    used to be read as "the broadcast failed" and re-queued a send that had
-    already gone out.
+    Returns (ok_count, fail_count); (0, 0) means nothing was attempted (no
+    token/no subscribers), so the caller must not record 'sent'. Never raises on a delivery problem.
     """
     token = await _get_discord_token_async()
     if not token:

@@ -19,8 +19,7 @@ from tg_utils import admin_only, _to_kst, ensure_utc, md_escape, parse_user_id
 
 
 # The BBS bot logs through TimedRotatingFileHandler with the default namer:
-# the live file keeps its base name and each rotated day gets a .YYYY-MM-DD
-# suffix. Both helpers below used to encode a scheme that never existed.
+# the live file keeps its base name, each rotated day gets a .YYYY-MM-DD suffix.
 _MAX_LOG_DAYS = 365
 
 # Seam for the post-restart settle wait. Tests replace this rather than
@@ -29,20 +28,14 @@ _sleep = asyncio.sleep
 
 
 def _bot_log_path(logs_dir):
-    """Path of the BBS bot's current info log.
-
-    The old bot_<date>.txt guess never matched a real file, so the post-restart
-    error check silently did nothing on every restart since it was written.
-    """
+    """Path of the BBS bot's current info log (bot.log, not a dated filename)."""
     return logs_dir / "bot.log"
 
 
 def _error_log_path(logs_dir, days_ago: int, target_date: str):
     """Path of the BBS error log for a given age in days.
 
-    Today's errors are still in error.log; older days rotate to
-    error.log.YYYY-MM-DD. The old error_<date>.log guess matched nothing, so
-    !log answered "No error log" every single time it was run.
+    Today's errors are in error.log; older days rotate to error.log.YYYY-MM-DD.
     """
     return logs_dir / ("error.log" if days_ago == 0 else f"error.log.{target_date}")
 
@@ -54,11 +47,9 @@ async def cmd_drestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Discord 봇 재시작 중...")
     discord_path = _cfg.PROJECTS["discord"]
     try:
-        # The bot root travels in an environment variable instead of being
-        # interpolated into the script text, so nothing in the path can
-        # terminate a PowerShell string. $rootPrefix also pins every match to
-        # that exact directory: the old '*<root>*' pattern matched sibling
-        # checkouts such as BBS-SCV and bbs-web too.
+        # The bot root travels in an environment variable, not interpolated into
+        # the script text, so nothing in the path can terminate a PowerShell
+        # string. $rootPrefix pins every match to that exact directory, not sibling checkouts.
         ps_command = (
             "$root = $env:BBS_RESTART_ROOT; "
             # Without a root every -like pattern collapses to '**' and the

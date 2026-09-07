@@ -27,10 +27,8 @@ TIME_FORMAT_HELP = (
 _NO_TIME = "NO_TIME"
 
 
-# Databases whose scheduled_news this process has already created/migrated.
-# Every accessor called _ensure_table, so the shared bbs.db took a DDL commit
-# every 30 seconds (~2,880/day) for a table that changes once per deployment.
-# Keyed by path, not a plain flag, so tests that swap in a temp DB still run it.
+# Databases whose scheduled_news this process has already migrated. Keyed by
+# path, not a plain flag, so tests that swap in a temp DB still run it.
 _ensured_paths: set[str] = set()
 
 
@@ -159,16 +157,9 @@ def get_pending() -> list[dict]:
         conn.close()
 
 
-# Retry budget for rows that could not be attempted at all - no Discord token,
-# or no subscribers. Such a row stays 'pending' so it can go out once the cause
-# is fixed, but "stays pending" alone is a live-lock: the 30s scheduler reclaims
-# it every cycle and the broadcast helper messages the operator each time.
-# Three attempts, then it becomes terminal.
-#
-# Deliberately in memory: the budget is about one bridge's behaviour right now,
-# not a fact about the news item, and a restart is exactly the event after which
-# retrying afresh is the right thing to do. Keyed by row id, which is
-# AUTOINCREMENT and never reused within a database.
+# Retry budget for rows that could never be attempted (no token/no subscribers).
+# Without a cap, "stays pending" live-locks the 30s scheduler forever. Three
+# attempts, then terminal. Kept in memory (not a DB fact) so a restart retries afresh.
 MAX_UNATTEMPTED_ATTEMPTS = 3
 _send_attempts: dict[int, int] = {}
 
@@ -189,18 +180,15 @@ def reset_send_attempts() -> None:
     _send_attempts.clear()
 
 
-# How far back !newslist looks for failures. Older than this is history, not a
-# to-do: nobody re-sends last month's news, and an unbounded list would grow
-# until it crowded the pending rows off the message.
+# How far back !newslist looks for failures — older is history, not a to-do,
+# and an unbounded list would crowd the pending rows off the message.
 _FAILED_WINDOW_DAYS = 7
 
 
 def get_failed(limit: int = 10, days: int = _FAILED_WINDOW_DAYS) -> list[dict]:
     """Recent rows whose broadcast reached nobody, newest first.
 
-    'failed' is terminal - get_due only looks at 'pending', so the scheduler
-    never touches these again. Without somewhere to see them, a send that
-    reached zero subscribers left no trace an operator would ever look at.
+    'failed' is terminal (get_due only looks at 'pending'), so without this list a zero-subscriber send left no trace.
     """
     _ensure_table()
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
@@ -303,10 +291,7 @@ def set_status_if_pending(news_id: int, status: str) -> bool:
 def cancel_cancellable(news_id: int) -> bool:
     """Cancel a row that has not gone out: 'pending' or 'failed'.
 
-    'failed' belongs here because it is terminal - the scheduler never retries
-    it - so without this the row sat in !newslist forever with no way to clear
-    it. 'sending' is deliberately excluded: that row may be mid-broadcast, and
-    force_release is the explicit, separately-worded escape hatch for it.
+    'sending' is excluded (may be mid-broadcast) — force_release is the separate escape hatch for that case.
     """
 
     def _w(conn):
@@ -327,11 +312,8 @@ def cancel_cancellable(news_id: int) -> bool:
 def force_release(news_id: int) -> bool:
     """Flip a row stuck in 'sending' to 'cancelled'. True iff a row moved.
 
-    A crash between claim_for_send and mark_status strands the row: get_due only
-    looks at 'pending', so nothing ever clears it and every boot re-warns about
-    it. Deliberately separate from the plain cancel path, which must never touch
-    a row that could still be mid-broadcast; the operator asks for this one
-    explicitly, after checking whether the news actually went out.
+    A crash between claim_for_send and mark_status strands a row here forever;
+    kept separate from plain cancel, which must never touch a mid-broadcast row.
     """
 
     def _w(conn):
@@ -356,10 +338,8 @@ def mark_status(news_id: int, status: str):
     db_write(_w)
 
 
-# Async wrappers. Everything above is synchronous sqlite that can sleep for
-# seconds while db_write retries SQLITE_BUSY; awaited straight from a handler it
-# froze the polling loop. The sync originals stay for tests and for callers that
-# are not on the event loop.
+# Async wrappers: the sync functions above can sleep seconds retrying
+# SQLITE_BUSY, which would freeze the polling loop if awaited directly.
 
 
 async def a_get_pending() -> list[dict]:
@@ -406,8 +386,7 @@ async def a_force_release(news_id: int) -> bool:
 async def cmd_newslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!newslist — show pending scheduled news, plus recent failures.
 
-    A 'failed' row is terminal, so listing it here is the only place an
-    operator learns that a scheduled send reached nobody.
+    'failed' is terminal, so this is the only place an operator learns a scheduled send reached nobody.
     """
     rows = await a_get_pending()
     failed = await a_get_failed()
@@ -434,9 +413,7 @@ async def cmd_newslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_newscc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!newscc <id> [force] — cancel a scheduled news item.
 
-    The plain form clears a row that never went out: 'pending', or 'failed'
-    once the operator has read the failure. `force` is the separate escape
-    hatch for a row stranded in 'sending' by a crash mid-broadcast.
+    Plain form clears 'pending'/'failed'; `force` is the escape hatch for a row stranded in 'sending' by a crash mid-broadcast.
     """
     text = (update.message.text or "").strip()
     arg = text[len("!newscc") :].strip()

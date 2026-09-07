@@ -16,19 +16,14 @@ TG_MSG_LIMIT = 4000
 def u16_len(s: str) -> int:
     """Length in UTF-16 code units, the unit Telegram and Discord actually cap.
 
-    Python counts code points, so 1500 non-BMP emoji measure as 1500 characters
-    locally but are 3000 units to both APIs - a message that looked well under
-    the limit was rejected outright.
+    Python counts code points, so 1500 non-BMP emoji measure as 1500 locally but 3000 units to both APIs.
     """
     return len(s.encode("utf-16-le")) // 2
 
 
 def _split_at_units(s: str, limit: int) -> tuple[str, str]:
-    """Cut s so the head is at most `limit` UTF-16 units, never mid-code-point.
-
-    A surrogate pair has to stay together: splitting one yields an unpaired
-    surrogate that the API rejects and that mangles the emoji for the reader.
-    """
+    """Cut s so the head is at most `limit` UTF-16 units, never mid-code-point —
+    a split surrogate pair is rejected by the API and mangles the emoji."""
     used = 0
     for i, ch in enumerate(s):
         ch_len = 2 if ord(ch) > 0xFFFF else 1
@@ -41,12 +36,9 @@ def _split_at_units(s: str, limit: int) -> tuple[str, str]:
 
 
 def split_message(text, limit=TG_MSG_LIMIT):
-    """Split text into chunks of at most `limit` UTF-16 units, preferring line
-    boundaries.
+    """Split text into chunks of at most `limit` UTF-16 units, preferring line boundaries.
 
-    Long messages (!list/!st/!hp) exceed Telegram's 4096-unit cap and would
-    otherwise fail silently; this breaks them into sendable pieces without
-    losing any content.
+    Long messages (!list/!st/!hp) exceed Telegram's cap and would otherwise fail silently.
     """
     if u16_len(text) <= limit:
         return [text]
@@ -67,11 +59,9 @@ def split_message(text, limit=TG_MSG_LIMIT):
     return chunks
 
 
-# Telegram Markdown (v1) specials, backslash included: it is the escape
-# character itself, so an unescaped one consumes the character that follows.
-# Arbitrary interpolated content (news text, a Discord global_name holding an
-# underscore) turns the whole message into a BadRequest, so escape before
-# building a parse_mode="Markdown" payload.
+# Telegram Markdown (v1) specials, backslash included (the escape char
+# itself). Arbitrary interpolated content (news text, a Discord username) can
+# otherwise turn the message into a BadRequest.
 _MD_SPECIALS_RE = re.compile(r"([_*`\[\\])")
 
 
@@ -88,9 +78,7 @@ _MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 def parse_int_arg(raw: Optional[str]) -> Optional[int]:
     """int() an argument only when it is ASCII digits, else None.
 
-    str.isdigit() is True for Unicode digit forms that int() then rejects
-    (U+00B2 SUPERSCRIPT TWO is one), which raised ValueError out of a handler
-    instead of printing the usage line.
+    str.isdigit() is True for Unicode digit forms that int() then rejects (e.g. U+00B2 SUPERSCRIPT TWO).
     """
     raw = (raw or "").strip()
     return int(raw) if raw.isascii() and raw.isdigit() else None
@@ -127,8 +115,8 @@ def admin_only(func):
 
     @wraps(func)
     async def wrapper(update, context):
-        # effective_user is None for channel posts, so the old attribute access
-        # raised AttributeError before the permission check ever ran.
+        # effective_user is None for channel posts; check before dereferencing to
+        # avoid an AttributeError before the permission check runs.
         user = update.effective_user
         if user is None or user.id != ALLOWED_USER_ID:
             return
@@ -158,9 +146,7 @@ async def safe_reply(message, text, parse_mode="Markdown"):
 async def safe_send(bot, chat_id, text, parse_mode="Markdown"):
     """Bot-level counterpart to safe_reply, for sends with no Update to reply to.
 
-    Boot notifications interpolate stored news content into Markdown; one broken
-    row used to raise BadRequest out of post_init and kill the bot before
-    polling ever started.
+    Boot notifications interpolate stored news content into Markdown, so a broken row could raise BadRequest and kill startup without this guard.
     """
     for chunk in split_message(text):
         try:

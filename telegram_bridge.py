@@ -96,19 +96,9 @@ async def _loop_monitor_task(app):
 def _send_status(news_id, ok_count: int, fail_count: int) -> str:
     """Status to record for a broadcast that returned (ok_count, fail_count).
 
-    Three outcomes, not two:
-
-    - reached somebody                       -> 'sent'
-    - every recipient attempted, all failed  -> 'failed' (terminal)
-    - nothing attempted at all, (0, 0)       -> 'pending', a limited number of
-      times. No Discord token or no subscribers means no delivery was even
-      tried, so recording a failure would be a lie, and the row should still go
-      out once the cause is fixed. But leaving it pending forever live-locks the
-      30s scheduler, which reclaims it and messages the operator every cycle.
-      After MAX_UNATTEMPTED_ATTEMPTS it becomes 'failed' and stops.
-
-    Spends the retry budget as a side effect, and returns it on any terminal
-    outcome so a row that later succeeds does not carry an old count.
+    'sent' if reached somebody; 'failed' if all attempted recipients failed;
+    'pending' (up to MAX_UNATTEMPTED_ATTEMPTS times) if nothing was attempted
+    at all (no token/no subscribers), then 'failed'. Spends the retry budget as a side effect.
     """
     if ok_count:
         _cns.forget_attempts(news_id)
@@ -125,9 +115,8 @@ def _send_status(news_id, ok_count: int, fail_count: int) -> str:
 async def _report_send_outcome(bot, label: str, news_id, ok_count, fail_count, status) -> None:
     """Log a broadcast result, and tell the operator once when retrying stops.
 
-    'failed' with fail_count 0 can only come from the exhausted retry budget:
-    every real delivery failure has attempted at least one recipient. That is
-    the one case worth a message, because nothing will happen after it.
+    'failed' with fail_count 0 means the retry budget was exhausted (a real
+    delivery failure always attempts >=1 recipient) — the one case worth a message.
     """
     if status == "sent":
         return
@@ -164,12 +153,8 @@ async def _report_send_outcome(bot, label: str, news_id, ok_count, fail_count, s
 
 
 async def _check_boot_scheduled_news(app):
-    """Run the boot news check without ever aborting startup.
-
-    post_init runs before polling begins, so anything raised in here killed
-    the bot outright - one stored row whose content broke Markdown parsing
-    was enough to stop the bridge from ever coming up.
-    """
+    """Run the boot news check without ever aborting startup — post_init runs
+    before polling begins, so anything raised in here would kill the bot outright."""
     try:
         await _boot_scheduled_news(app)
     except Exception as e:
@@ -245,9 +230,8 @@ async def _boot_scheduled_news(app):
             await _report_send_outcome(app.bot, "Boot", item["id"], ok_count, fail_count, status)
         except Exception as e:
             if sent_ok:
-                # Only the status write failed. Leave the row 'sending': it is
-                # terminal for the scheduler (get_due is pending-only), so the
-                # news is never re-sent, and !newslist surfaces it for a human.
+                # Only the status write failed. Leave the row 'sending' —
+                # terminal for the scheduler (get_due is pending-only), so !newslist surfaces it for a human.
                 log.error(f"Boot scheduled news status write failed id={item['id']}: {e}")
             else:
                 # Send did not complete -> back to 'pending' for retry.
@@ -341,13 +325,8 @@ async def cmd_bbnews_text(update: Update, content: str):
 
 
 def _safe_media_filename(raw) -> str:
-    """Reduce a client-supplied file name to a bare name with no path parts.
-
-    Document.file_name comes from whoever uploaded the file, so a name like
-    "..\\..\\x.txt" used to place the download outside the target directory
-    (and then delete whatever it landed on). PureWindowsPath treats both slash
-    styles as separators on every platform, so this holds on Linux CI too.
-    """
+    """Reduce a client-supplied file name to a bare name with no path parts —
+    a name like "..\\..\\x.txt" could otherwise place the download outside the target directory."""
     name = PureWindowsPath(str(raw or "")).name
     if not name or name in (".", ".."):
         name = f"media_{time.time_ns()}"
@@ -362,8 +341,8 @@ async def _handle_news_media(
     try:
         tg_file = await context.bot.get_file(media.file_id)
     except Exception as e:
-        # Telegram refuses files over 20MB with a BadRequest; the admin used to
-        # get no reply at all and could not tell the send from a silent drop.
+        # Telegram refuses files over 20MB with a BadRequest, so reply with the
+        # error rather than dropping it silently.
         log.warning(f"news2 get_file failed: {e}")
         await safe_reply(update.message, f"❌ 미디어 다운로드 실패: {e}", parse_mode=None)
         return
@@ -372,8 +351,7 @@ async def _handle_news_media(
     if not fname:
         ext = ".mp4" if hasattr(media, "duration") else ".jpg"
         fname = f"media_{time.time_ns()}{ext}"
-    # Private temp dir, not the BBS project root: downloads used to litter a
-    # working git tree that has no ignore rule for them.
+    # Private temp dir, not the BBS project root, which has no ignore rule for downloaded files.
     tmpdir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
     tmp = Path(tmpdir) / _safe_media_filename(fname)
     try:
@@ -420,8 +398,7 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
             )
         except sqlite3.OperationalError as e:
             # save_scheduled is deliberately single-attempt (retrying an
-            # INSERT could double-schedule), so a locked DB surfaces here.
-            # Silence let the operator believe the news was scheduled.
+            # INSERT could double-schedule), so a locked DB must surface here, not fail silently.
             log.error(f"save_scheduled failed: {e}")
             await update.message.reply_text(
                 "❌ DB 사용 중 — 뉴스가 예약되지 않았습니다. 잠시 후 다시 시도하세요."
@@ -455,9 +432,8 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # PTB message filters key off effective_message, so edited_message,
-    # channel_post and business_message updates all reach this handler with
-    # update.message set to None. Dereferencing it before the auth gate raised
-    # AttributeError for anyone who merely edited a message at the bot.
+    # channel_post and business_message updates reach this handler with
+    # update.message None; check before the auth gate.
     message = update.message
     if message is None:
         return
@@ -506,11 +482,8 @@ def _cleanup_old_logs(days: int = 30):
 
 
 def _cleanup_orphan_temp(max_age_sec: int = 3600):
-    """Delete orphaned media-download temp dirs left behind by crashes.
-
-    Sweeps the system temp dir, where downloads now land, and still sweeps the
-    BBS project root for files written by pre-2026-09 builds.
-    """
+    """Delete orphaned media-download temp dirs left behind by crashes — sweeps
+    the system temp dir, and the BBS project root for older builds' leftovers."""
     cutoff = time.time() - max_age_sec
 
     def _remove_if_stale(entry: Path):
@@ -527,7 +500,7 @@ def _cleanup_orphan_temp(max_age_sec: int = 3600):
 
     for entry in Path(tempfile.gettempdir()).glob(f"{_TEMP_PREFIX}*"):
         _remove_if_stale(entry)
-    # Legacy location: downloads used to be written into the project tree.
+    # Legacy location: the project tree, for older builds.
     for proj_dir in {Path(p) for p in PROJECTS.values()}:
         if not proj_dir.exists():
             continue
@@ -536,14 +509,8 @@ def _cleanup_orphan_temp(max_age_sec: int = 3600):
 
 
 def _run_daily_maintenance():
-    """Housekeeping the bridge owes once a day: log retention and a heartbeat.
-
-    _cleanup_old_logs and _cleanup_orphan_temp used to run only in post_init, so
-    a process that stayed up for weeks never pruned either one - which is how a
-    month of token-bearing logs survived. The heartbeat exists because a healthy
-    bridge can go days without emitting a single line, making "alive"
-    indistinguishable from "dead" in the log.
-    """
+    """Housekeeping the bridge owes once a day: log retention and a heartbeat —
+    a healthy bridge can otherwise go days without a log line, making "alive" indistinguishable from "dead"."""
     try:
         _cleanup_old_logs()
     except Exception as e:
@@ -569,13 +536,9 @@ async def _maintenance_task():
 def _pid_alive(pid: int) -> bool:
     """True if a process with this pid exists.
 
-    os.kill(pid, 0) is NOT usable here: on Windows CPython maps os.kill to
-    TerminateProcess, so the liveness probe would kill the process it asks about.
-
-    Windows answers via WaitForSingleObject rather than GetExitCodeProcess: a
-    process that exited with code 259 is indistinguishable from a running one
-    under STILL_ACTIVE, while the wait handle is signalled only once the process
-    has really terminated.
+    os.kill(pid, 0) is NOT usable on Windows: CPython maps it to TerminateProcess.
+    Uses WaitForSingleObject, not GetExitCodeProcess, since STILL_ACTIVE (259) is
+    indistinguishable from a real exit code.
     """
     if pid <= 0:
         return False
@@ -598,9 +561,8 @@ def _pid_alive(pid: int) -> bool:
 
         handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
         if not handle:
-            # A failed open is not proof of death. Windows reports a running
-            # process this account may not touch as ACCESS_DENIED, and only
-            # INVALID_PARAMETER actually means "no process with that id".
+            # A failed open is not proof of death: Windows reports a running
+            # process this account may not touch as ACCESS_DENIED; only INVALID_PARAMETER means "no such pid".
             err = ctypes.get_last_error()
             if err == ERROR_ACCESS_DENIED:
                 return True
@@ -627,19 +589,16 @@ _BRIDGE_MARKER = "telegram_bridge.py"
 def _process_command_line(pid: int):
     """Command line of a running process, or None when it cannot be read.
 
-    None means "could not determine", never "not running" - callers have to fail
-    open on it. Windows has no cheap ctypes route to another process's command
-    line, so this shells out to CIM; the pid travels in the environment so no
-    value is ever interpolated into the query.
+    None means "could not determine", never "not running" — callers must fail
+    open. Shells out to CIM (no cheap ctypes route); the pid travels via env var so nothing is interpolated into the query.
     """
     if sys.platform == "win32":
         script = (
             "$p = Get-CimInstance Win32_Process "
             '-Filter "ProcessId=$env:BRIDGE_PROBE_PID" -ErrorAction SilentlyContinue; '
             "if ($null -eq $p) { 'NOPROC' } "
-            # A CommandLine of $null means the process exists but will not say
-            # what it is - a protected or cross-session process. That is
-            # "cannot tell", not "not running".
+            # A CommandLine of $null means the process exists but won't say what
+            # it is (protected/cross-session) — "cannot tell", not "not running".
             "elseif ($null -eq $p.CommandLine) { 'UNKNOWN' } "
             "else { 'CMD:' + $p.CommandLine }"
         )
@@ -692,15 +651,9 @@ def _lock_holder_state(pid: int) -> str:
 def acquire_single_instance(pid_path: Path = None) -> bool:
     """Claim the bridge pid file. False means a live bridge already holds it.
 
-    Two pollers on one token make Telegram reject getUpdates with 409 Conflict,
-    and !re0 racing start_bot.bat has produced exactly that.
-
-    Liveness alone is not enough to justify refusing to start. After a crash or
-    a reboot the recorded pid is very likely to belong to some unrelated
-    process, and start_bot.bat ends in `pause` - so a wrong refusal leaves no
-    bridge running at all, waiting on a keypress nobody is there to give. Every
-    uncertain case therefore starts the bridge: only a pid whose command line
-    actually names this script stops it.
+    Two pollers on one token make Telegram reject getUpdates with 409 Conflict.
+    Liveness alone does not justify refusing to start — a wrong refusal can
+    leave no bridge running (start_bot.bat ends in `pause`), so every uncertain case starts the bridge.
     """
     pid_path = pid_path or (LOG_DIR / "bridge.pid")
     try:
@@ -738,14 +691,8 @@ def acquire_single_instance(pid_path: Path = None) -> bool:
 
 
 def release_single_instance(pid_path: Path = None) -> None:
-    """Delete our pid file, but only while it still names this process.
-
-    Leaving it behind makes the next start pay for a full CIM probe of a pid
-    that no longer exists. Deleting one another instance has since claimed would
-    be worse: it would hand a second poller the lock. So the content is checked
-    against this pid first, and any failure is a debug note - releasing a lock
-    must never be the thing that breaks a shutdown.
-    """
+    """Delete our pid file, but only while it still names this process —
+    deleting one another instance has since claimed would hand a second poller the lock."""
     pid_path = pid_path or (LOG_DIR / "bridge.pid")
     try:
         if not pid_path.exists():

@@ -61,8 +61,8 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = await _dh._fetch_discord_usernames(list(all_uids))
 
     def _n(uid) -> str:
-        # Escaped here, not at each call site: a Discord global_name holding an
-        # underscore used to turn the whole !list message into a BadRequest.
+        # Escaped here, not at each call site — a Discord global_name holding an
+        # underscore would otherwise turn the whole !list message into a BadRequest.
         return md_escape(names.get(str(uid), str(uid)))
 
     lines = ["📋 *구독자 목록*\n"]
@@ -106,16 +106,9 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _record_event(conn, uid: int, action: str) -> None:
-    """Write the subscription_events audit row for a membership change.
-
-    Same transaction as the change itself, so the two cannot disagree - only the
-    Discord bot used to write these rows, which left anything done from here
-    invisible to !se and to BBS-side retention stats.
-
-    Best-effort on purpose: the membership change is what the operator asked
-    for. A drifted or missing subscription_events table (this is the BBS bot's
-    schema, not ours) must cost an audit row, not the subscription. sqlite rolls
-    back only the failed statement, so the surrounding transaction still commits.
+    """Write the subscription_events audit row for a membership change, in the
+    same transaction so the two cannot disagree. Best-effort: a missing/drifted
+    table (the BBS bot's schema, not ours) must cost an audit row, not the subscription.
     """
     try:
         conn.execute(
@@ -210,11 +203,8 @@ async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _events_cutoff(days: int) -> str:
     """Lower bound for a subscription_events.ts window, as a comparable string.
 
-    ts defaults to sqlite's datetime('now'), i.e. "YYYY-MM-DD HH:MM:SS", and the
-    query compares it lexically. isoformat() puts a "T" where the stored value
-    has a space, and "T" (0x54) sorts above " " (0x20) - so every event that
-    fell on the cutoff's own date compared as older than the cutoff and dropped
-    out of the window entirely.
+    Matches sqlite's stored format "YYYY-MM-DD HH:MM:SS" exactly — isoformat()'s
+    "T" separator sorts above " " and would break the lexical comparison.
     """
     return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 

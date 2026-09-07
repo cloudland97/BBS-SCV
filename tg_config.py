@@ -65,11 +65,9 @@ log = logging.getLogger("telegram_bridge")
 
 # -- Secret redaction --
 
-# A Telegram bot token travels in the API path (api.telegram.org/bot<TOKEN>/...).
-# httpx logged every request at INFO until 2026-08-24, which wrote roughly
-# 166,000 live-token lines into logs/. Lowering that logger's level fixed the
-# known emitter, but any library that logs a request URL or an exception
-# carrying one can do it again - so redact at the handler, not at the call site.
+# A Telegram bot token travels in the API path (api.telegram.org/bot<TOKEN>/...);
+# any library that logs a request URL or an exception carrying one can leak it,
+# so redact at the handler, not the call site.
 _TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 _TOKEN_MARKER = "bot<redacted>"
 
@@ -99,8 +97,7 @@ class TokenRedactingFilter(logging.Filter):
 class TokenRedactingFormatter(logging.Formatter):
     """Formatter that also scrubs the formatted traceback.
 
-    The filter only sees the message; a token inside exc_info (httpx puts the
-    full URL in its exception text) is rendered later, so it needs this pass.
+    The filter only sees the message; a token inside exc_info (rendered later) needs this separate pass.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -110,8 +107,7 @@ class TokenRedactingFormatter(logging.Formatter):
 def install_token_redaction(*handlers: logging.Handler) -> None:
     """Attach the redacting filter and formatter to *handlers*.
 
-    Called with the root handlers at import time; safe to call again (a handler
-    keeps one filter instance per call, which is idempotent in effect).
+    Called with the root handlers at import time; safe to call again (idempotent in effect).
     """
     for handler in handlers:
         handler.addFilter(TokenRedactingFilter())
@@ -131,11 +127,7 @@ install_token_redaction(*logging.getLogger().handlers)
 
 
 def _parse_chat_id(raw: str, origin: str) -> int:
-    """Parse CHAT_ID, reporting what is wrong instead of a bare ValueError.
-
-    A non-numeric value used to surface as `invalid literal for int()` with no
-    hint about which setting or file was at fault.
-    """
+    """Parse CHAT_ID, reporting which setting/file is at fault instead of a bare ValueError."""
     raw = (raw or "").strip()
     if not raw:
         raise RuntimeError(
@@ -304,9 +296,8 @@ def db_write(fn, max_attempts=5, base_sleep=0.05, max_total=8.0):
 async def db_write_async(fn, **kwargs):
     """Await db_write off the event loop.
 
-    db_write retries SQLITE_BUSY with time.sleep (up to 8s). Run inline in a
-    handler that stalled the whole polling loop whenever the BBS bot held the
-    shared database.
+    db_write retries SQLITE_BUSY with time.sleep (up to 8s), which would stall
+    the polling loop if run inline in a handler.
     """
     return await asyncio.to_thread(db_write, fn, **kwargs)
 
@@ -328,9 +319,7 @@ async def db_read_async(fn):
 async def fetch_rows_async(sql: str, params: tuple = ()) -> list:
     """Run one SELECT off the event loop on a fresh connection and return the rows.
 
-    Every handler read goes through here (or db_read_async), so a BBS-side
-    write holding the shared bbs.db can no longer stall polling for the
-    connect timeout.
+    Every handler read goes through here (or db_read_async), so a BBS-side write cannot stall polling.
     """
     return await db_read_async(lambda conn: conn.execute(sql, params).fetchall())
 
