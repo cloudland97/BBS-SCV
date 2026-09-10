@@ -32,6 +32,7 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 | `!help` | Show command list |
 | `!re` | Restart Discord bot |
 | `!re0` | Restart Telegram bridge |
+| `!reboot ok` | Reboot the host PC after a 60s delay (`!reboot cc` aborts) |
 | `!hp` | Loop health status |
 | `!log [N]` | Error logs (N=1 for yesterday) |
 | `!st [userID] [Nd]` | Command usage stats |

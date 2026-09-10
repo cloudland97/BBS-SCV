@@ -63,6 +63,19 @@ class TestDispatchRouting:
         hit, _ = _route(monkeypatch, "!re0")
         assert hit == ["!re0"]
 
+    def test_reboot_not_shadowed_by_re(self, monkeypatch):
+        hit, _ = _route(monkeypatch, "!reboot ok")
+        assert hit == ["!reboot"]
+        # Attached form misses the exact table and must still win the prefix fallback.
+        hit, _ = _route(monkeypatch, "!rebootok")
+        assert hit == ["!reboot"]
+
+    def test_reboot_typo_never_reaches_discord_restart(self, monkeypatch):
+        # A near-miss must land on the reboot usage text, never on "!re".
+        for typo in ("!rebot ok", "!reboo ok", "!rebooot"):
+            hit, _ = _route(monkeypatch, typo)
+            assert hit in (["!reboot"], ["!reb"]), typo
+
     def test_command_with_args_routes_by_first_token(self, monkeypatch):
         hit, _ = _route(monkeypatch, "!dm 123456789012345678 hello")
         assert hit == ["!dm"]

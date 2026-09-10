@@ -14,6 +14,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *관리봇 명령어*\n\n"
         "📡 *텔레그램 봇*\n"
         "`!re0` — 텔레그램 봇 재시작\n"
+        "`!reboot ok` — 이 PC 재부팅 (`!reboot cc` 취소)\n"
         "`!news 내용` — 봉봉뉴스 즉시 발송\n"
         "`!news 08:30 내용` — 예약 발송 (오늘/내일 자동)\n"
         "`!news 내일 08:30 내용` — 내일 예약\n"

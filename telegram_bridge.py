@@ -728,6 +728,9 @@ import cmd_moderation as _cm  # noqa: E402
 # Dispatch table for text commands — longer/more-specific prefixes must come first
 # to prevent shorter prefixes from shadowing them (e.g. "!re0" before "!re").
 _CMD_ROUTES: list[tuple[str, object]] = [
+    ("!reboot", _cm.cmd_reboot),
+    # Typo guard: "!rebot"/"!reboo" must reach the reboot usage text, not fall through to "!re".
+    ("!reb", _cm.cmd_reboot),
     ("!re0", _cm.cmd_restart),
     ("!re", _cd.cmd_drestart),
     ("!sync", _cd.cmd_sync),

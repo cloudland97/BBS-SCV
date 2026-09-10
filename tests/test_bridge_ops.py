@@ -665,6 +665,81 @@ class TestRestartCommandShape:
 
 
 # =========================================================
+# !reboot - host reboot needs an explicit "ok", and "cc" aborts it
+# =========================================================
+
+
+class TestRebootCommand:
+    def _run(self, monkeypatch, text, returncode=0, raise_exc=None):
+        import cmd_moderation as cm
+        from tests.fakes import FakeUpdate
+
+        calls = []
+
+        async def _to_thread(fn, argv, **kwargs):
+            calls.append((argv, kwargs))
+            if raise_exc is not None:
+                raise raise_exc
+            return type("R", (), {"returncode": returncode, "stdout": "", "stderr": "boom"})()
+
+        monkeypatch.setattr(cm.asyncio, "to_thread", _to_thread)
+        update = FakeUpdate(text)
+        asyncio.run(cm.cmd_reboot(update, None))
+        return calls, update.message.replies
+
+    def test_bare_command_only_prints_usage(self, monkeypatch):
+        calls, replies = self._run(monkeypatch, "!reboot")
+        assert calls == []
+        assert replies and "!reboot ok" in replies[0]
+
+    def test_wrong_argument_does_not_reboot(self, monkeypatch):
+        for text in ("!reboot yes", "!rebot ok", "!rebootok"):
+            calls, _ = self._run(monkeypatch, text)
+            assert calls == [], text
+
+    def test_ok_schedules_a_delayed_forced_restart(self, monkeypatch):
+        import cmd_moderation as cm
+
+        calls, replies = self._run(monkeypatch, "!reboot OK")
+        assert len(calls) == 1
+        argv, kwargs = calls[0]
+        assert argv[0] == "shutdown" and "/r" in argv and "/f" in argv
+        assert argv[argv.index("/t") + 1] == str(cm._REBOOT_DELAY_SEC)
+        assert cm._REBOOT_DELAY_SEC >= 60
+        # Console tools write the OEM code page; a bounded wait keeps the loop responsive.
+        assert kwargs["encoding"] == "oem" and kwargs["errors"] == "replace"
+        assert kwargs["capture_output"] is True and kwargs["timeout"] == 15
+        assert any("재부팅" in r and "!reboot cc" in r for r in replies)
+
+    def test_cc_aborts_the_pending_restart(self, monkeypatch):
+        calls, replies = self._run(monkeypatch, "!reboot cc")
+        assert [a for a, _ in calls] == [["shutdown", "/a"]]
+        assert any("취소" in r for r in replies)
+
+    def test_cc_with_nothing_pending_is_informational(self, monkeypatch):
+        _, replies = self._run(monkeypatch, "!reboot cc", returncode=1116)
+        assert any("없음" in r for r in replies)
+        assert not any("실패" in r for r in replies)
+
+    def test_second_ok_reports_the_running_countdown(self, monkeypatch):
+        _, replies = self._run(monkeypatch, "!reboot ok", returncode=1190)
+        assert any("이미" in r and "!reboot cc" in r for r in replies)
+        assert not any("실패" in r for r in replies)
+
+    def test_nonzero_exit_is_reported_not_swallowed(self, monkeypatch):
+        calls, replies = self._run(monkeypatch, "!reboot ok", returncode=1)
+        assert len(calls) == 1
+        assert any("실패" in r and "boom" in r for r in replies)
+
+    def test_subprocess_exception_still_answers(self, monkeypatch):
+        import subprocess
+
+        exc = subprocess.TimeoutExpired(cmd="shutdown", timeout=15)
+        _, replies = self._run(monkeypatch, "!reboot ok", raise_exc=exc)
+        assert any("실행 실패" in r for r in replies)
+
+
+# =========================================================
 # N10 / R20 - the unreachable /bbnews entry point is gone
 # =========================================================
 
