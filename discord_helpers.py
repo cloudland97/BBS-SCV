@@ -98,18 +98,24 @@ async def _fetch_discord_usernames(uids: list[str]) -> dict[str, str]:
 
 
 def _get_bongnews_subscribers():
+    """Return the subscriber list, or None when bbs.db could not be read.
+
+    None and [] must stay apart: a lock or a schema change otherwise reads to the
+    operator as "nobody is subscribed".
+    """
     try:
         conn = open_db()  # None when bbs.db is absent — never create a stray file
         if conn is None:
-            return []
+            log.warning("bongnews subscribers unavailable: bbs.db not found")
+            return None
         try:
             rows = conn.execute("SELECT user_id FROM bongnews_subscribers").fetchall()
             return [row[0] for row in rows]
         finally:
             conn.close()
     except Exception as e:
-        log.debug(f"bongnews subscribers fetch failed: {e}")
-        return []
+        log.warning(f"bongnews subscribers fetch failed: {type(e).__name__} {e}")
+        return None
 
 
 def _save_latest(content: str) -> None:
@@ -303,6 +309,9 @@ async def _broadcast_bbnews(
         await update.message.reply_text("Discord token not found.")
         return
     subscribers = await _get_bongnews_subscribers_async()
+    if subscribers is None:
+        await update.message.reply_text("Subscriber lookup failed (bbs.db unreadable).")
+        return
     if not subscribers:
         await update.message.reply_text("No bongnews subscribers.")
         return
@@ -341,6 +350,11 @@ async def _broadcast_bbnews_auto(
         await _send_summary(bot, chat_id, "❌ 예약 뉴스 발송 실패: Discord token not found.")
         return 0, 0
     subscribers = await _get_bongnews_subscribers_async()
+    if subscribers is None:
+        await _send_summary(
+            bot, chat_id, "❌ 예약 뉴스 발송 실패: Subscriber lookup failed (bbs.db unreadable)."
+        )
+        return 0, 0
     if not subscribers:
         await _send_summary(bot, chat_id, "❌ 예약 뉴스 발송 실패: No subscribers.")
         return 0, 0

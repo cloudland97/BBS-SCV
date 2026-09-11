@@ -201,3 +201,26 @@ class TestAutoBroadcastResult:
         self._patch(monkeypatch, results=[True, True, True])
         bot = _FakeBot(fail=True)
         assert asyncio.run(dh._broadcast_bbnews_auto(bot, 1, "news")) == (3, 0)
+
+
+class TestSubscriberLookupFailure:
+    """A failed read of bbs.db must not read as 'nobody is subscribed'."""
+
+    def test_an_unreadable_db_returns_none_not_an_empty_list(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(dh, "open_db", _boom)
+        assert dh._get_bongnews_subscribers() is None
+
+    def test_a_missing_db_returns_none(self, monkeypatch):
+        monkeypatch.setattr(dh, "open_db", lambda: None)
+        assert dh._get_bongnews_subscribers() is None
+
+    def test_the_auto_broadcast_says_lookup_failed(self, monkeypatch):
+        monkeypatch.setattr(dh, "_get_discord_token", lambda: "tok")
+        monkeypatch.setattr(dh, "_get_bongnews_subscribers", lambda: None)
+        bot = _FakeBot()
+
+        assert asyncio.run(dh._broadcast_bbnews_auto(bot, 1, "news")) == (0, 0)
+        assert any("Subscriber lookup failed" in str(m) for m in bot.sent)
