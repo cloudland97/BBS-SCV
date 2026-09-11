@@ -4,7 +4,7 @@
 
 ## 프로젝트 개요
 
-디스코드 봇(BBS) 원격 모니터링·관리용 **텔레그램** 봇. polling 단방향 구조라 `InlineKeyboard` 콜백이 동작하지 않는다 — **버튼 UI를 쓰지 말고 모든 인터랙션을 `!` 텍스트 커맨드로 만든다.**
+디스코드 봇(BBS) 원격 모니터링·관리용 **텔레그램** 봇. polling 단방향 구조라 `InlineKeyboard` 콜백이 동작하지 않는다 — **모든 인터랙션을 `!` 텍스트 커맨드로 만든다.**
 
 ## 명령어 접두어 규칙
 
@@ -33,7 +33,7 @@ P1 라우팅 충돌 / P2 KST 변환 / P3 `telegram.error.TimedOut` → [docs/deb
 
 ## 재시작 로직
 
-**대상 프로세스 매칭 범위를 좁게 유지한다.** `C:\DEV` 아래 다른 프로젝트의 python 프로세스를 잡으면 안 된다 — 경로 접두어로 고정하고 와일드카드를 넓히지 말 것. 구현은 `cmd_discord.cmd_drestart`의 `BBS_RESTART_ROOT` 방식 참조.
+**대상 프로세스는 경로 접두어로 고정한다.** 와일드카드를 넓히면 `C:\DEV` 아래 다른 프로젝트의 python 프로세스까지 잡는다. 구현은 `cmd_discord.cmd_drestart`의 `BBS_RESTART_ROOT` 방식 참조.
 
 ## 운영 우선순위
 
