@@ -119,10 +119,18 @@ def _get_bongnews_subscribers():
 
 
 def _save_latest(content: str) -> None:
-    """Write the newest bongnews body for the BBS feed embed to pick up (best-effort — a write failure is logged, not fatal)."""
+    """Write the newest bongnews body for the BBS feed embed to pick up (best-effort — a write failure is logged, not fatal).
+
+    An image-only broadcast carries no text; writing it would blank the feed
+    headline, so the previous one is kept instead (2026-09-12).
+    """
+    body = content.strip()
+    if not body:
+        log.info("bongnews latest not updated: broadcast carried no text")
+        return
     try:
         latest_path = DISCORD_DATA_PATH / "bongnews_latest.txt"
-        latest_path.write_text(content.strip(), encoding="utf-8")
+        latest_path.write_text(body, encoding="utf-8")
     except Exception as e:
         log.warning(f"Failed to save bongnews latest: {e}")
 

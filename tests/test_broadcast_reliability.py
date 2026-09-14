@@ -224,3 +224,25 @@ class TestSubscriberLookupFailure:
 
         assert asyncio.run(dh._broadcast_bbnews_auto(bot, 1, "news")) == (0, 0)
         assert any("Subscriber lookup failed" in str(m) for m in bot.sent)
+
+
+class TestLatestHeadlinePersistence:
+    """An image-only broadcast has no text and must not blank the feed headline."""
+
+    def test_an_empty_body_keeps_the_previous_headline(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dh, "DISCORD_DATA_PATH", tmp_path)
+        target = tmp_path / "bongnews_latest.txt"
+        target.write_text("earlier headline", encoding="utf-8")
+
+        dh._save_latest("   \n  ")
+
+        assert target.read_text(encoding="utf-8") == "earlier headline"
+
+    def test_a_real_body_replaces_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dh, "DISCORD_DATA_PATH", tmp_path)
+        target = tmp_path / "bongnews_latest.txt"
+        target.write_text("earlier headline", encoding="utf-8")
+
+        dh._save_latest("  fresh headline  ")
+
+        assert target.read_text(encoding="utf-8") == "fresh headline"
