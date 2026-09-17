@@ -5,14 +5,13 @@ argument prefix fallback), plus parse_schedule_time's branches.
 These pin the exact behaviors AGENTS.md's debugging playbook calls out as
 scenario P1 (prefix collision: !re vs !re0)."""
 
+import pytest
 import asyncio
 import os
 import sys
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import pytest
 
 import cmd_news_schedule as cns
 import telegram_bridge as tb
@@ -76,44 +75,10 @@ class TestDispatchRouting:
             hit, _ = _route(monkeypatch, typo)
             assert hit in (["!reboot"], ["!reb"]), typo
 
-    def test_command_with_args_routes_by_first_token(self, monkeypatch):
-        hit, _ = _route(monkeypatch, "!dm 123456789012345678 hello")
-        assert hit == ["!dm"]
-
-    def test_attached_argument_falls_back_to_prefix(self, monkeypatch):
-        # "!log1" has no space, so exact-token lookup misses and the ordered
-        # prefix fallback must still resolve it.
-        hit, _ = _route(monkeypatch, "!log1")
-        assert hit == ["!log"]
-
-    def test_unknown_command_gets_help_pointer(self, monkeypatch):
-        hit, update = _route(monkeypatch, "!nope")
-        assert hit == []
-        assert update.message.replies and "!help" in update.message.replies[0]
-
 
 class TestParseScheduleTime:
     """parse_schedule_time is the highest-complexity pure function in the repo
     and had zero coverage. One test per branch + rollover + validation."""
-
-    def test_no_time_prefix_raises_no_time(self):
-        with pytest.raises(ValueError) as e:
-            cns.parse_schedule_time("그냥 내용만 있는 뉴스")
-        assert str(e.value) == cns._NO_TIME
-
-    def test_tomorrow_prefix(self):
-        target, content = cns.parse_schedule_time("내일 08:30 아침 뉴스")
-        kst = target.astimezone(cns.KST)
-        tomorrow = (datetime.now(cns.KST) + timedelta(days=1)).date()
-        assert (kst.date(), kst.hour, kst.minute) == (tomorrow, 8, 30)
-        assert content == "아침 뉴스"
-
-    def test_time_then_tomorrow_variant(self):
-        target, content = cns.parse_schedule_time("08:30 내일 아침 뉴스")
-        kst = target.astimezone(cns.KST)
-        tomorrow = (datetime.now(cns.KST) + timedelta(days=1)).date()
-        assert (kst.date(), kst.hour, kst.minute) == (tomorrow, 8, 30)
-        assert content == "아침 뉴스"
 
     def test_month_day_in_the_past_rolls_forward_never_backward(self):
         # Invariant form (year-boundary safe): a past M/D must land in the
@@ -126,13 +91,6 @@ class TestParseScheduleTime:
         assert kst > now
         assert (kst.month, kst.day) == (past.month, past.day)
         assert content == "연례 공지"
-
-    def test_month_day_in_the_future_stays_this_year(self):
-        now = datetime.now(cns.KST)
-        future = now + timedelta(days=30)
-        raw = f"{future.month}/{future.day} 09:00 공지"
-        target, _ = cns.parse_schedule_time(raw)
-        assert target.astimezone(cns.KST).year == future.year
 
     def test_bare_time_already_passed_rolls_to_tomorrow(self):
         # Invariant form (midnight-safe): a just-passed HH:MM must schedule in

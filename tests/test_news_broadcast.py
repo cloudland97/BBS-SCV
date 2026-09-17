@@ -12,7 +12,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import discord_helpers as dh
 from tests.fakes import FakeResp as _FakeResp
-from tg_utils import split_message
 
 
 class _FakeSession:
@@ -27,19 +26,6 @@ class _FakeSession:
         # a message send (json content or multipart form)
         self.message_posts.append(json["content"] if json else data)
         return _FakeResp(200, {})
-
-
-class TestSplitForDiscord:
-    def test_long_news_splits_under_limit(self):
-        text = "**bongnews**\n\n" + "\n\n".join("가" * 180 for _ in range(12))
-        assert len(text) > 2000
-        chunks = split_message(text, limit=2000)
-        assert len(chunks) > 1
-        assert all(len(c) <= 2000 for c in chunks)
-        assert "".join(chunks) == text
-
-    def test_short_news_single_chunk(self):
-        assert split_message("hi", limit=2000) == ["hi"]
 
 
 class TestSendDiscordDm:

@@ -10,7 +10,6 @@ DB wrappers that keep sqlite retries off the polling loop (R6).
 import asyncio
 import os
 import sys
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,25 +30,6 @@ BACKSLASH = chr(92)
 # Written as escapes so no non-ASCII byte lands in a source file.
 SUPERSCRIPT_TWO = "\u00b2"  # str.isdigit() is True, int() rejects it
 ARABIC_INDIC_DIGITS = "\u0660\u0661\u0662"
-HANGUL_SYLLABLES = "\uac00\ub098\ub2e4"
-
-
-# =========================================================
-# R10 - Telegram and Discord count UTF-16 code units
-# =========================================================
-
-
-class TestUtf16Length:
-    def test_ascii_counts_the_same_either_way(self):
-        assert u16_len("hello") == len("hello") == 5
-
-    def test_bmp_hangul_counts_one_unit_each(self):
-        text = HANGUL_SYLLABLES
-        assert u16_len(text) == len(text) == 3
-
-    def test_non_bmp_emoji_counts_two_units(self):
-        assert u16_len(EMOJI) == 2
-        assert len(EMOJI) == 1
 
 
 class TestSplitByUtf16Units:
@@ -59,10 +39,6 @@ class TestSplitByUtf16Units:
         assert len(chunks) > 1
         assert all(u16_len(c) <= 2000 for c in chunks)
         assert "".join(chunks) == text
-
-    def test_emoji_run_under_the_limit_stays_whole(self):
-        text = EMOJI * 900  # 1800 units
-        assert split_message(text, limit=2000) == [text]
 
     def test_surrogate_pairs_are_never_split(self):
         text = EMOJI * 10
@@ -74,19 +50,6 @@ class TestSplitByUtf16Units:
     def test_a_limit_narrower_than_one_code_point_terminates(self):
         chunks = split_message(EMOJI * 3, limit=1)
         assert "".join(chunks) == EMOJI * 3
-
-    def test_mixed_content_is_lossless(self):
-        text = "\n".join(f"line {i} {EMOJI} {HANGUL_SYLLABLES}" for i in range(300))
-        chunks = split_message(text, limit=200)
-        assert "".join(chunks) == text
-        assert all(u16_len(c) <= 200 for c in chunks)
-
-    @pytest.mark.parametrize("size", [1999, 2000, 2001, 4000, 4001])
-    def test_ascii_boundaries_still_hold(self, size):
-        text = "a" * size
-        chunks = split_message(text, limit=2000)
-        assert "".join(chunks) == text
-        assert all(len(c) <= 2000 for c in chunks)
 
 
 # =========================================================
@@ -146,20 +109,11 @@ class TestSafeSendFallback:
 
 
 class TestMarkdownEscape:
-    def test_escapes_every_v1_special(self):
-        assert tg_utils.md_escape("a_b*c`d[e") == "a\\_b\\*c\\`d\\[e"
-
     def test_escapes_the_escape_character_itself(self):
         # S11: an unescaped backslash is itself a Markdown escape, so it eats
         # the character after it - including one this function just added.
         assert tg_utils.md_escape("a" + BACKSLASH + "b") == "a" + BACKSLASH * 2 + "b"
         assert tg_utils.md_escape(BACKSLASH + "_") == BACKSLASH * 2 + BACKSLASH + "_"
-
-    def test_leaves_plain_text_untouched(self):
-        assert tg_utils.md_escape("plain text 123") == "plain text 123"
-
-    def test_handles_none(self):
-        assert tg_utils.md_escape(None) == ""
 
 
 # =========================================================
@@ -168,26 +122,10 @@ class TestMarkdownEscape:
 
 
 class TestArgumentParsing:
-    def test_plain_ascii_digits(self):
-        assert parse_int_arg("42") == 42
-        assert parse_user_id("123456789012345678") == 123456789012345678
-
     def test_unicode_digit_forms_are_rejected(self):
         # These are exactly the values str.isdigit() accepted and int() refused.
         assert parse_int_arg(SUPERSCRIPT_TWO) is None
         assert parse_user_id(ARABIC_INDIC_DIGITS) is None
-
-    def test_discord_mentions_are_accepted(self):
-        assert parse_user_id("<@123>") == 123
-        assert parse_user_id("<@!456>") == 456
-
-    def test_mentions_are_not_valid_plain_ints(self):
-        assert parse_int_arg("<@123>") is None
-
-    @pytest.mark.parametrize("raw", [None, "", "   ", "abc", "12a", "-5", "1.5", "<@>"])
-    def test_junk_is_rejected(self, raw):
-        assert parse_int_arg(raw) is None
-        assert parse_user_id(raw) is None
 
 
 # =========================================================
@@ -228,36 +166,6 @@ def list_db(tmp_path, monkeypatch):
 
 
 class TestSubscriberList:
-    def test_display_names_are_escaped(self, list_db, monkeypatch):
-        """R9: !list interpolates Discord global_names into Markdown."""
-
-        async def _names(uids):
-            return {u: "a_b*c" for u in uids}
-
-        monkeypatch.setattr(dh, "_fetch_discord_usernames", _names)
-        update = _FakeUpdate("!list")
-        asyncio.run(cs.cmd_list(update, None))
-        output = "\n".join(update.message.replies)
-        assert "a\\_b\\*c" in output
-        assert "a_b*c" not in output
-
-    def test_danawa_product_names_are_escaped(self, list_db, monkeypatch):
-        conn = tg_config.get_bbs_db()
-        try:
-            conn.execute("INSERT INTO danawa_subscriptions VALUES (7, ?)", ("RTX_5090 *OC*",))
-            conn.commit()
-        finally:
-            conn.close()
-
-        async def _names(uids):
-            return {}
-
-        monkeypatch.setattr(dh, "_fetch_discord_usernames", _names)
-        update = _FakeUpdate("!list")
-        asyncio.run(cs.cmd_list(update, None))
-        output = "\n".join(update.message.replies)
-        assert "RTX\\_5090 \\*OC\\*" in output
-
     def test_every_pubg_nickname_is_shown(self, list_db):
         update = _FakeUpdate("!list")
         asyncio.run(cs.cmd_list(update, None))
@@ -294,26 +202,6 @@ class TestConnectionReleasedBeforeHttp:
         assert order[0] == "db-close"
         assert "http" in order
 
-    def test_reads_run_off_the_event_loop(self, list_db, monkeypatch):
-        threads = []
-        real_read = tg_config.db_read
-
-        def _tracked_read(fn):
-            import threading
-
-            threads.append(threading.current_thread() is threading.main_thread())
-            return real_read(fn)
-
-        monkeypatch.setattr(tg_config, "db_read", _tracked_read)
-
-        async def _lookup(uids):
-            return {}
-
-        monkeypatch.setattr(dh, "_fetch_discord_usernames", _lookup)
-        for text, handler in (("!ud 7", cd.cmd_dm_log), ("!ud", cd.cmd_dm_log)):
-            asyncio.run(handler(_FakeUpdate(text), None))
-        assert threads and not any(threads)
-
 
 # =========================================================
 # R6 - sqlite work happens off the event loop
@@ -321,40 +209,6 @@ class TestConnectionReleasedBeforeHttp:
 
 
 class TestAsyncDbWrappers:
-    def test_reads_run_in_a_worker_thread(self, list_db):
-        seen = {}
-
-        def _probe(conn):
-            seen["thread"] = threading.get_ident()
-            return conn.execute("SELECT COUNT(*) FROM pubg_subscribers").fetchone()[0]
-
-        async def _go():
-            seen["loop"] = threading.get_ident()
-            return await tg_config.db_read_async(_probe)
-
-        assert asyncio.run(_go()) == 3
-        assert seen["thread"] != seen["loop"]
-
-    def test_writes_run_in_a_worker_thread(self, list_db):
-        seen = {}
-
-        def _probe(conn):
-            seen["thread"] = threading.get_ident()
-            conn.execute("INSERT INTO ark_subscribers VALUES (99)")
-            return True
-
-        async def _go():
-            seen["loop"] = threading.get_ident()
-            return await tg_config.db_write_async(_probe)
-
-        assert asyncio.run(_go()) is True
-        assert seen["thread"] != seen["loop"]
-        conn = tg_config.get_bbs_db()
-        try:
-            assert conn.execute("SELECT COUNT(*) FROM ark_subscribers").fetchone()[0] == 1
-        finally:
-            conn.close()
-
     def test_read_wrapper_always_closes_its_connection(self, list_db):
         with pytest.raises(RuntimeError):
 

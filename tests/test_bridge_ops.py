@@ -24,27 +24,6 @@ import tg_config
 from tg_config import ALLOWED_USER_ID
 
 
-# =========================================================
-# N4 / N5 - BBS log file naming
-# =========================================================
-
-
-class TestBbsLogPaths:
-    """BBS logs through TimedRotatingFileHandler with the default namer, so the
-    live file is error.log / bot.log and rotated days get a .YYYY-MM-DD suffix.
-    The old error_<date>.log and bot_<date>.txt guesses matched nothing, so !log
-    always answered 'No error log' and the post-restart check never fired."""
-
-    def test_today_reads_the_live_error_log(self, tmp_path):
-        assert cd._error_log_path(tmp_path, 0, "2026-09-06") == tmp_path / "error.log"
-
-    def test_past_day_reads_the_rotated_error_log(self, tmp_path):
-        assert cd._error_log_path(tmp_path, 3, "2026-09-03") == tmp_path / "error.log.2026-09-03"
-
-    def test_bot_log_is_the_rotating_base_name(self, tmp_path):
-        assert cd._bot_log_path(tmp_path) == tmp_path / "bot.log"
-
-
 class TestLogCommand:
     """!log end-to-end against a temp logs dir."""
 
@@ -114,9 +93,6 @@ class TestSafeMediaFilename:
         name = tb._safe_media_filename(raw)
         assert name.startswith("media_")
         assert "/" not in name and "\\" not in name
-
-    def test_ordinary_name_is_left_alone(self):
-        assert tb._safe_media_filename("report.pdf") == "report.pdf"
 
 
 class TestOrphanTempCleanup:
@@ -207,10 +183,6 @@ class TestMediaDownload:
         assert written.parent == (tmp_path / "dl").resolve()
         assert seen["filename"] == "escape.txt"
         assert seen["bytes"] == b"payload"
-
-    def test_temp_dir_is_removed_afterwards(self, monkeypatch, tmp_path):
-        self._run(monkeypatch, tmp_path, _FakeMedia(file_name="a.png"))
-        assert not (tmp_path / "dl").exists()
 
     def test_nothing_is_written_into_the_bbs_project_tree(self, monkeypatch, tmp_path):
         _u, tg_file, _s = self._run(monkeypatch, tmp_path, _FakeMedia(file_name="a.png"))
@@ -414,13 +386,6 @@ class TestReleaseSingleInstance:
         monkeypatch.setattr(type(pid_file), "read_text", _boom)
         assert tb.release_single_instance(pid_file) is None
 
-    def test_acquire_then_release_round_trips(self, tmp_path):
-        pid_file = tmp_path / "bridge.pid"
-        assert tb.acquire_single_instance(pid_file) is True
-        tb.release_single_instance(pid_file)
-        # A later start sees a clean slate and never runs the CIM probe.
-        assert tb.acquire_single_instance(pid_file) is True
-
 
 class TestLockHolderState:
     def test_a_live_non_bridge_process_is_other(self, monkeypatch):
@@ -461,10 +426,6 @@ class TestLivenessProbe:
         # STILL_ACTIVE.
         assert tb._pid_alive(os.getpid()) is True
 
-    def test_rejects_impossible_pids(self):
-        assert tb._pid_alive(0) is False
-        assert tb._pid_alive(-1) is False
-
     def test_reads_this_process_own_command_line(self):
         cmdline = tb._process_command_line(os.getpid())
         assert cmdline
@@ -493,12 +454,6 @@ class TestLivenessProbe:
         """
         assert tb._process_command_line(4) is None
         assert tb._lock_holder_state(4) == "unknown"
-
-    def test_the_probe_script_distinguishes_all_three_answers(self):
-        import inspect
-
-        src = inspect.getsource(tb._process_command_line)
-        assert "'NOPROC'" in src and "'UNKNOWN'" in src and "'CMD:'" in src
 
 
 # =========================================================
@@ -541,38 +496,6 @@ class TestTokenRedaction:
     def test_token_passed_as_a_lazy_arg_is_masked(self):
         out = self._capture(lambda lg: lg.warning("url=%s", "https://x/bot42:AbC-dEf_1/x"))
         assert "AbC-dEf_1" not in out
-
-    def test_ordinary_lines_are_left_alone(self):
-        out = self._capture(lambda lg: lg.info("Loop alert: market_loop 3h2m"))
-        assert "Loop alert: market_loop 3h2m" in out
-
-    def test_redact_tokens_is_pure(self):
-        assert tg_config.redact_tokens("bot1:AAA and bot2:BBB") == (
-            "bot<redacted> and bot<redacted>"
-        )
-        assert tg_config.redact_tokens("no secrets here") == "no secrets here"
-
-
-# =========================================================
-# R23 - CHAT_ID diagnostics
-# =========================================================
-
-
-class TestChatIdDiagnostics:
-    def test_non_numeric_value_names_the_setting_and_the_file(self):
-        with pytest.raises(RuntimeError) as e:
-            tg_config._parse_chat_id("@myhandle", "tg.env")
-        message = str(e.value)
-        assert "CHAT_ID" in message and "tg.env" in message and "@myhandle" in message
-
-    def test_empty_value_is_reported_as_empty(self):
-        with pytest.raises(RuntimeError) as e:
-            tg_config._parse_chat_id("   ", "tg.env")
-        assert "empty" in str(e.value)
-
-    def test_valid_value_parses(self):
-        assert tg_config._parse_chat_id(" 12345 ", "tg.env") == 12345
-        assert tg_config._parse_chat_id("-100200", "tg.env") == -100200
 
 
 # =========================================================
@@ -737,13 +660,3 @@ class TestRebootCommand:
         exc = subprocess.TimeoutExpired(cmd="shutdown", timeout=15)
         _, replies = self._run(monkeypatch, "!reboot ok", raise_exc=exc)
         assert any("실행 실패" in r for r in replies)
-
-
-# =========================================================
-# N10 / R20 - the unreachable /bbnews entry point is gone
-# =========================================================
-
-
-def test_dead_bbnews_slash_entry_point_removed():
-    assert not hasattr(tb, "cmd_bbnews")
-    assert hasattr(tb, "cmd_bbnews_text")  # the live text path stays

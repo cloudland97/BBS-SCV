@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import sys
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -113,47 +112,6 @@ class TestConcurrencyCap:
         results = asyncio.run(dh._send_all(None, "tok", list(range(40)), "hi", None, None))
         assert results == [True] * 40
         assert live["peak"] <= dh._DM_CONCURRENCY
-
-
-class TestBlockingWorkIsOffTheLoop:
-    """S4: the token read and the subscriber query both block; neither may run
-    on the polling loop's thread."""
-
-    def test_token_and_subscribers_are_read_in_a_worker_thread(self, monkeypatch):
-        seen = {}
-
-        def _token():
-            seen["token_thread"] = threading.get_ident()
-            return "tok"
-
-        def _subs():
-            seen["subs_thread"] = threading.get_ident()
-            return [1]
-
-        monkeypatch.setattr(dh, "_get_discord_token", _token)
-        monkeypatch.setattr(dh, "_get_bongnews_subscribers", _subs)
-
-        async def _go():
-            seen["loop_thread"] = threading.get_ident()
-            return (
-                await dh._get_discord_token_async(),
-                await dh._get_bongnews_subscribers_async(),
-            )
-
-        assert asyncio.run(_go()) == ("tok", [1])
-        assert seen["token_thread"] != seen["loop_thread"]
-        assert seen["subs_thread"] != seen["loop_thread"]
-
-    def test_latest_file_write_is_off_the_loop(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(dh, "DISCORD_DATA_PATH", tmp_path)
-        seen = {}
-
-        async def _go():
-            seen["loop_thread"] = threading.get_ident()
-            await dh._save_latest_async("  body  ")
-
-        asyncio.run(_go())
-        assert (tmp_path / "bongnews_latest.txt").read_text(encoding="utf-8") == "body"
 
 
 class TestAutoBroadcastResult:

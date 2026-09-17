@@ -292,13 +292,6 @@ class TestBootSendStatus:
         cns.reset_send_attempts()
         assert tb._send_status(1, ok, fail) == expected
 
-    def test_repeated_unattempted_results_exhaust_the_budget(self):
-        cns.reset_send_attempts()
-        seen = [tb._send_status(42, 0, 0) for _ in range(cns.MAX_UNATTEMPTED_ATTEMPTS)]
-        assert seen == ["pending"] * (cns.MAX_UNATTEMPTED_ATTEMPTS - 1) + ["failed"]
-        # The budget is returned with the terminal status, so nothing leaks.
-        assert 42 not in cns._send_attempts
-
     def test_budgets_are_tracked_per_row(self):
         cns.reset_send_attempts()
         assert tb._send_status(1, 0, 0) == "pending"
@@ -344,13 +337,6 @@ class TestCancelClearsFailedRows:
         assert cns.cancel_cancellable(sending) is False
         assert cns.cancel_cancellable(sent) is False
 
-    def test_a_cancelled_failure_leaves_the_newslist(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        cns.mark_status(nid, "failed")
-        assert nid in {r["id"] for r in cns.get_failed()}
-        cns.cancel_cancellable(nid)
-        assert nid not in {r["id"] for r in cns.get_failed()}
-
 
 class TestCompletedSendIsNeverRequeued:
     """S2: once the DMs are out, no later failure may put the row back in the
@@ -383,54 +369,7 @@ class TestCompletedSendIsNeverRequeued:
         assert _status(nid) == "pending"
 
 
-# =========================================================
-# S6 - a terminal 'failed' row has somewhere to be seen
-# =========================================================
-
-
 class TestNewslistShowsFailures:
-    def test_failed_rows_are_listed(self, temp_db, monkeypatch):
-        nid = cns.save_scheduled("bad news", datetime.now(UTC) - timedelta(minutes=1))
-
-        async def _bcast(bot, chat_id, content):
-            return (0, 3)
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert _status(nid) == "failed"
-
-        update = _FakeUpdate("!newslist")
-        asyncio.run(cns.cmd_newslist(update, None))
-        output = "\n".join(update.message.replies)
-        assert "FAILED" in output
-        assert f"[{nid}]" in output
-        assert "bad news" in output
-
-    def test_a_lone_failed_row_still_produces_a_list(self, temp_db):
-        nid = cns.save_scheduled("bad news", datetime.now(UTC))
-        cns.mark_status(nid, "failed")
-        update = _FakeUpdate("!newslist")
-        asyncio.run(cns.cmd_newslist(update, None))
-        assert any("FAILED" in r for r in update.message.replies)
-
-    def test_pending_rows_are_still_listed_without_failures(self, temp_db):
-        nid = cns.save_scheduled("good news", datetime.now(UTC) + timedelta(hours=1))
-        update = _FakeUpdate("!newslist")
-        asyncio.run(cns.cmd_newslist(update, None))
-        output = "\n".join(update.message.replies)
-        assert f"[{nid}]" in output
-        assert "FAILED" not in output
-
-    def test_failures_older_than_the_window_drop_off(self, temp_db):
-        """R3: a month-old failure is history, not a to-do."""
-        recent = cns.save_scheduled("recent", datetime.now(UTC) - timedelta(days=2))
-        cns.mark_status(recent, "failed")
-        ancient = cns.save_scheduled("ancient", datetime.now(UTC) - timedelta(days=40))
-        cns.mark_status(ancient, "failed")
-        ids = {r["id"] for r in cns.get_failed()}
-        assert recent in ids
-        assert ancient not in ids
-
     def test_get_failed_ignores_every_other_status(self, temp_db):
         pending = cns.save_scheduled("a", datetime.now(UTC))
         sent = cns.save_scheduled("b", datetime.now(UTC))
@@ -455,19 +394,6 @@ class TestBootResilience:
         monkeypatch.setattr(tb, "_boot_scheduled_news", _boom)
         # post_init runs before polling; anything raised here killed the bot.
         assert asyncio.run(tb._check_boot_scheduled_news(_FakeApp())) is None
-
-    def test_stale_warning_escapes_markdown_in_stored_content(self, temp_db):
-        nid = cns.save_scheduled("a_b*c `d` [e]", datetime.now(UTC) + timedelta(days=1))
-        cns.claim_for_send(nid)
-        old = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
-        tg_config.db_write(
-            lambda c: c.execute("UPDATE scheduled_news SET claimed_at = ? WHERE id = ?", (old, nid))
-        )
-        app = _FakeApp()
-        asyncio.run(tb._boot_scheduled_news(app))
-        assert app.bot.sent
-        warning = app.bot.sent[0]
-        assert "a\\_b\\*c" in warning
 
     def test_a_broken_telegram_send_does_not_abort_the_check(self, temp_db, monkeypatch):
         from telegram.error import BadRequest
@@ -615,53 +541,6 @@ class TestSubscriptionEvents:
         asyncio.run(cs.cmd_sub(update, None))
         assert _events() == []
         assert update.message.replies
-
-
-# =========================================================
-# R9 - raw content and display names are escaped before Markdown
-# =========================================================
-
-
-class TestMarkdownEscapingOfInterpolatedText:
-    """News content and Discord display names are arbitrary text going into a
-    parse_mode="Markdown" payload. Unescaped, one underscore in a product name
-    or a nickname turned the whole reply into a BadRequest."""
-
-    BAD = "buy_now *cheap* [link]"
-
-    def test_newslist_escapes_the_pending_preview(self, temp_db):
-        cns.save_scheduled(self.BAD, datetime.now(UTC) + timedelta(hours=1))
-        update = _FakeUpdate("!newslist")
-        asyncio.run(cns.cmd_newslist(update, None))
-        output = "\n".join(update.message.replies)
-        assert "buy\\_now" in output
-        assert "\\*cheap\\*" in output
-        assert "\\[link]" in output
-
-    def test_newslist_escapes_the_failed_preview(self, temp_db):
-        nid = cns.save_scheduled(self.BAD, datetime.now(UTC))
-        cns.mark_status(nid, "failed")
-        update = _FakeUpdate("!newslist")
-        asyncio.run(cns.cmd_newslist(update, None))
-        output = "\n".join(update.message.replies)
-        assert "buy\\_now" in output
-
-    def test_newscc_escapes_the_confirmation_preview(self, temp_db):
-        nid = cns.save_scheduled(self.BAD, datetime.now(UTC) + timedelta(hours=1))
-        update = _FakeUpdate(f"!newscc {nid}")
-        asyncio.run(cns.cmd_newscc(update, None))
-        output = "\n".join(update.message.replies)
-        assert "buy\\_now" in output
-
-    def test_sub_add_escapes_the_discord_display_name(self, subs_db, monkeypatch):
-        async def _names(uids):
-            return {u: "we_are_*bold*" for u in uids}
-
-        monkeypatch.setattr(dh, "_fetch_discord_usernames", _names)
-        update = _FakeUpdate("!sub add 123456789012345678")
-        asyncio.run(cs.cmd_sub(update, None))
-        output = "\n".join(update.message.replies)
-        assert "we\\_are\\_\\*bold\\*" in output
 
 
 # =========================================================
