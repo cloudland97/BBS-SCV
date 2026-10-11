@@ -184,6 +184,19 @@ async def _boot_scheduled_news(app):
             )
         await safe_send(app.bot, ALLOWED_USER_ID, "\n".join(lines))
 
+    try:
+        unclaimed = await _cns.a_get_unclaimed_sending()
+        if unclaimed:
+            ids = ", ".join(f"`[{r['id']}]`" for r in unclaimed)
+            await safe_send(
+                app.bot,
+                ALLOWED_USER_ID,
+                f"❌ `claimed_at` 없이 발송 중(sending)인 예약 뉴스: {ids} "
+                "— 클레임 기록 누락. 발송 여부 확인 후 `!newscc <id> force`로 해제.",
+            )
+    except Exception as e:
+        log.error(f"Claim invariant check failed: {e}", exc_info=True)
+
     cutoff = now_utc - timedelta(minutes=15)
     due = await _cns.a_get_due(now_utc)
     if not due:

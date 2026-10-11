@@ -266,6 +266,26 @@ def get_stale_sending(older_than_utc: datetime) -> list[dict]:
         conn.close()
 
 
+# claimed_at is already present in the first tracked commit (1.0, 2026-08-21); every
+# 'sending' write since then sets it, so only rows created before that can lack it.
+_CLAIM_COLUMN_SINCE = "2026-08-21"
+
+
+def get_unclaimed_sending() -> list[dict]:
+    """'sending' rows with no claimed_at, created after the claim column existed (invariant breach)."""
+    _ensure_table()
+    conn = get_bbs_db()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM scheduled_news "
+            "WHERE status = 'sending' AND claimed_at IS NULL AND created_at >= ? ORDER BY id",
+            (_CLAIM_COLUMN_SINCE,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def set_status_if_pending(news_id: int, status: str) -> bool:
     """Flip a still-pending row to *status*. Returns True iff this call won.
 
@@ -376,6 +396,10 @@ async def a_set_status_if_pending(news_id: int, status: str) -> bool:
 
 async def a_get_stale_sending(older_than_utc: datetime) -> list[dict]:
     return await asyncio.to_thread(get_stale_sending, older_than_utc)
+
+
+async def a_get_unclaimed_sending() -> list[dict]:
+    return await asyncio.to_thread(get_unclaimed_sending)
 
 
 async def a_force_release(news_id: int) -> bool:
