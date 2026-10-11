@@ -164,6 +164,7 @@ class TestDailyMaintenance:
     def test_startup_registers_all_background_tasks(self, tmp_path, monkeypatch):
         """Asserts the tasks actually exist, not that the source mentions them."""
         monkeypatch.setattr(tb, "LOG_DIR", tmp_path)
+        monkeypatch.setattr(tb, "RESTART_MARKER", tmp_path / "restart_pending")
         monkeypatch.setattr(tb, "_cleanup_orphan_temp", lambda *a, **kw: None)
         monkeypatch.setattr(tb, "check_shared_schema", lambda: [])
         monkeypatch.setattr(tb, "BBS_DB_PATH", tmp_path / "absent.db")
