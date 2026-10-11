@@ -214,7 +214,6 @@ EXPECTED_SHARED_TABLES = (
     "loop_health_daily",
     "command_usage",
     "user_dm",
-    "temp_bans",
     "bongnews_subscribers",
     "subscribers",
     "market_subscribers",
@@ -222,6 +221,11 @@ EXPECTED_SHARED_TABLES = (
     "morning_subscribers",
     "danawa_subscriptions",
     "pubg_subscribers",
+    "treasury_subscribers",
+    "bluearchive_subscribers",
+    "booth_subscribers",
+    "whale_subscribers",
+    "etf_subscribers",
     "subscription_events",
 )
 

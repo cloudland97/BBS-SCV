@@ -36,7 +36,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "whale_subscribers",
             "etf_subscribers",
         }
-        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "ticker", "nickname", "fund"}
+        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "nickname", "fund"}
 
         def _rows(table, *cols):
             if table not in _ALLOWED_TABLES:
