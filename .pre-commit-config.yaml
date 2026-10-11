@@ -20,7 +20,10 @@ repos:
     hooks:
       - id: pytest
         name: pytest (full suite)
-        entry: python scripts/run_tests.py
+        # `py` launcher, not `python`: on the company PC `python` on PATH is the
+        # Microsoft Store stub, which prints "Python" and fails every push.
+        # run_tests.py itself re-execs pytest under .venv.
+        entry: py scripts/run_tests.py
         language: system
         pass_filenames: false
         stages: [pre-push]
