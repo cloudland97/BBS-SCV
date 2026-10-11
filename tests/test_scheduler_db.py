@@ -96,19 +96,6 @@ class TestBootSendStatus:
         asyncio.run(tb._boot_scheduled_news(_FakeApp()))
         assert _status(nid) == "sent"
 
-    def test_a_send_that_was_never_attempted_stays_pending(self, temp_db, monkeypatch):
-        """R6: (0, 0) means no Discord token or no subscribers, so nothing was
-        ever attempted. Recording a delivery failure for it would be a lie; the
-        row waits for the next cycle instead."""
-        nid = self._due_row()
-
-        async def _bcast(bot, chat_id, content):
-            return (0, 0)
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert _status(nid) == "pending"
-
     def test_unattempted_retries_are_capped_then_the_row_goes_terminal(self, temp_db, monkeypatch):
         """A (0, 0) result re-queues, but only for a bounded number of cycles.
 
