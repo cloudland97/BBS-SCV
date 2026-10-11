@@ -3,6 +3,7 @@
 import asyncio
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from telegram import Update
@@ -29,6 +30,10 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     _cfg.log.info("Telegram bot restart requested")
     await update.message.reply_text("✅ 텔레그램 봇 재시작 중..")
+    try:
+        _cfg.RESTART_MARKER.write_text(str(time.time()), encoding="utf-8")
+    except OSError as e:
+        _cfg.log.warning(f"Restart marker write failed: {e}")
 
     async def _do_restart():
         await asyncio.sleep(1)

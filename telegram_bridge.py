@@ -39,6 +39,7 @@ from tg_config import (
     LOOP_ALERT_COOLDOWN_SEC,
     LOOP_ALERT_THRESHOLDS,
     PROJECTS,
+    RESTART_MARKER,
     check_shared_schema,
     get_bbs_db,
     log,
@@ -730,7 +731,36 @@ async def post_init(application):
         # A standalone clone has no sibling BBS repo; connecting anyway would
         # raise inside post_init and kill the bot before polling ever starts.
         log.warning("bbs.db not found - boot scheduled-news check skipped")
+    await _report_restart_done(application)
     log.info("Telegram bridge starting")
+
+
+async def _report_restart_done(application):
+    # Fail-open: a missing or unreadable marker must never block startup.
+    try:
+        # Atomic claim: only one of two overlapping boots can win the rename.
+        claimed = RESTART_MARKER.with_name(f"{RESTART_MARKER.name}.{os.getpid()}")
+        try:
+            os.replace(RESTART_MARKER, claimed)
+        except FileNotFoundError:
+            return
+        try:
+            raw = claimed.read_text(encoding="utf-8").strip()
+        finally:
+            claimed.unlink(missing_ok=True)
+        try:
+            elapsed = int(time.time() - float(raw))
+        except ValueError:
+            elapsed = -1
+        if 0 <= elapsed <= 300:
+            text = f"✅ 텔레그램 봇 재시작 완료 ({elapsed}초)"
+        elif elapsed > 300:
+            text = f"✅ 텔레그램 봇 시작됨 (마지막 !re0 요청 {elapsed // 60}분 전)"
+        else:
+            text = "✅ 텔레그램 봇 재시작 완료"
+        await safe_send(application.bot, ALLOWED_USER_ID, text)
+    except Exception as e:
+        log.warning(f"Restart completion notice failed: {e}")
 
 
 import cmd_help as _cc  # noqa: E402

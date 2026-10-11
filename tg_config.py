@@ -20,6 +20,8 @@ KST = timezone(timedelta(hours=9))
 
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
+# Written by !re0 just before the relaunch; the next bridge's post_init reports completion and removes it.
+RESTART_MARKER = LOG_DIR / "restart_pending"
 
 
 def _log_namer(default_name: str) -> str:
