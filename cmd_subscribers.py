@@ -30,8 +30,13 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "morning_subscribers",
             "danawa_subscriptions",
             "pubg_subscribers",
+            "treasury_subscribers",
+            "bluearchive_subscribers",
+            "booth_subscribers",
+            "whale_subscribers",
+            "etf_subscribers",
         }
-        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "ticker", "nickname"}
+        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "ticker", "nickname", "fund"}
 
         def _rows(table, *cols):
             if table not in _ALLOWED_TABLES:
@@ -48,15 +53,34 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _rows("morning_subscribers", "user_id", "cities"),
             _rows("danawa_subscriptions", "user_id", "name"),
             _rows("pubg_subscribers", "user_id", "nickname"),
+            _rows("treasury_subscribers", "user_id"),
+            _rows("bluearchive_subscribers", "user_id"),
+            _rows("booth_subscribers", "user_id"),
+            _rows("whale_subscribers", "user_id"),
+            _rows("etf_subscribers", "user_id", "fund"),
         )
 
-    # Seven queries against the shared bbs.db; off the event loop so a BBS-side
+    # Queries against the shared bbs.db; off the event loop so a BBS-side
     # write lock cannot stall Telegram polling.
-    bongnews, spurs, market, ark, morning, danawa, pubg = await _cfg.db_read_async(_read)
+    (
+        bongnews,
+        spurs,
+        market,
+        ark,
+        morning,
+        danawa,
+        pubg,
+        treasury,
+        bluearchive,
+        booth,
+        whale,
+        etf,
+    ) = await _cfg.db_read_async(_read)
 
-    for rows in (bongnews, spurs, market, ark, morning, pubg):
+    for rows in (bongnews, spurs, market, ark, morning, danawa, pubg):
         all_uids.update(str(r["user_id"]) for r in rows)
-    all_uids.update(str(r["user_id"]) for r in danawa)
+    for rows in (treasury, bluearchive, booth, whale, etf):
+        all_uids.update(str(r["user_id"]) for r in rows)
 
     names = await _dh._fetch_discord_usernames(list(all_uids))
 
@@ -100,6 +124,11 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _section(
         "PUBG", pubg, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['nickname'] for r in rs)}`"
     )
+    _section("MSTR 공시", treasury, lambda uid, _: f"  · {_n(uid)}")
+    _section("스마트머니", whale, lambda uid, _: f"  · {_n(uid)}")
+    _section("ETF 보유", etf, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['fund'] for r in rs)}`")
+    _section("블루 아카이브", bluearchive, lambda uid, _: f"  · {_n(uid)}")
+    _section("Booth", booth, lambda uid, _: f"  · {_n(uid)}")
 
     lines.append(f"전체 이용자: {len(all_uids)}명")
     await _utils.safe_reply(update.message, "\n".join(lines))
