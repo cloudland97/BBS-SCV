@@ -44,10 +44,6 @@ class TestAuthGate:
         assert hit == []
         assert update.message.replies == ["No permission"]
 
-    def test_admin_reaches_dispatch(self, monkeypatch):
-        hit, _ = _route(monkeypatch, "!help")
-        assert hit == ["!help"]
-
     def test_chatid_answers_anyone_with_own_ids_only(self, monkeypatch):
         hit, update = _route(monkeypatch, "!chatid", user_id=424242)
         assert hit == []

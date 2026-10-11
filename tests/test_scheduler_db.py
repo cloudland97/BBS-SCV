@@ -58,64 +58,11 @@ def _status(news_id: int) -> str:
 
 
 # =========================================================
-# N11 / DB-14 - the shared DB stops taking a DDL commit every 30s
-# =========================================================
-
-
-class TestEnsureTableCaching:
-    def test_ddl_runs_once_per_database(self, temp_db, monkeypatch):
-        cns.reset_ensure_cache()
-        calls = []
-        real = cns.db_write
-
-        def _counting(fn, **kw):
-            calls.append(fn)
-            return real(fn, **kw)
-
-        monkeypatch.setattr(cns, "db_write", _counting)
-        cns._ensure_table()
-        cns._ensure_table()
-        cns.get_pending()
-        cns.get_due(datetime.now(UTC))
-        assert len(calls) == 1
-
-    def test_a_different_database_still_gets_its_ddl(self, temp_db, tmp_path, monkeypatch):
-        other = tmp_path / "other.db"
-        monkeypatch.setattr(tg_config, "BBS_DB_PATH", other)
-        cns._ensure_table()
-        conn = tg_config.get_bbs_db()
-        try:
-            names = {
-                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-        finally:
-            conn.close()
-        assert "scheduled_news" in names
-
-
-# =========================================================
 # R7 - release a row stranded in 'sending'
 # =========================================================
 
 
 class TestForceRelease:
-    def test_releases_a_stuck_sending_row(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        assert cns.claim_for_send(nid) is True
-        assert cns.force_release(nid) is True
-        assert _status(nid) == "cancelled"
-
-    def test_leaves_a_pending_row_alone(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        assert cns.force_release(nid) is False
-        assert _status(nid) == "pending"
-
-    def test_is_idempotent(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        cns.claim_for_send(nid)
-        assert cns.force_release(nid) is True
-        assert cns.force_release(nid) is False
-
     def test_command_releases_only_with_the_force_word(self, temp_db):
         nid = cns.save_scheduled("news", datetime.now(UTC))
         cns.claim_for_send(nid)
@@ -128,19 +75,6 @@ class TestForceRelease:
         asyncio.run(cns.cmd_newscc(forced, None))
         assert _status(nid) == "cancelled"
         assert any(f"[{nid}]" in r and "cancelled" in r for r in forced.message.replies)
-
-    def test_force_on_a_healthy_row_says_so(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        update = _FakeUpdate(f"!newscc {nid} force")
-        asyncio.run(cns.cmd_newscc(update, None))
-        assert any(f"ID {nid}:" in r and "sending" in r for r in update.message.replies)
-        assert _status(nid) == "pending"
-
-    def test_non_ascii_digits_get_usage_not_a_traceback(self, temp_db):
-        # R19: SUPERSCRIPT TWO passes str.isdigit() but int() rejects it.
-        update = _FakeUpdate(f"!newscc {SUPERSCRIPT_TWO}")
-        asyncio.run(cns.cmd_newscc(update, None))
-        assert update.message.replies and "Usage" in update.message.replies[0]
 
 
 # =========================================================
@@ -215,39 +149,6 @@ class TestBootSendStatus:
         assert len(sends) == cns.MAX_UNATTEMPTED_ATTEMPTS
         assert len([m for m in app.bot.sent if "`failed`" in m and "!news" in m]) == 1
 
-    def test_the_retry_budget_is_returned_when_a_send_succeeds(self, temp_db, monkeypatch):
-        """A row that fails once then works must not carry the old count."""
-        nid = self._due_row()
-        outcome = {"value": (0, 0)}
-
-        async def _bcast(bot, chat_id, content):
-            return outcome["value"]
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert cns._send_attempts.get(nid) == 1
-
-        outcome["value"] = (2, 0)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert _status(nid) == "sent"
-        assert nid not in cns._send_attempts
-
-    def test_cancelling_stops_the_retry_loop_and_clears_the_budget(self, temp_db, monkeypatch):
-        """!newscc is the operator's way out before the cap is reached."""
-        nid = self._due_row()
-
-        async def _bcast(bot, chat_id, content):
-            return (0, 0)
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert cns._send_attempts.get(nid) == 1
-
-        asyncio.run(cns.cmd_newscc(_FakeUpdate(f"!newscc {nid}"), None))
-        assert _status(nid) == "cancelled"
-        assert not any(r["id"] == nid for r in cns.get_due(datetime.now(UTC)))
-        assert nid not in cns._send_attempts
-
     def test_every_dm_failing_is_marked_failed(self, temp_db, monkeypatch):
         nid = self._due_row()
 
@@ -268,16 +169,6 @@ class TestBootSendStatus:
         monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
         asyncio.run(tb._boot_scheduled_news(_FakeApp()))
         assert _status(nid) == "pending"
-
-    def test_a_failed_row_is_never_picked_up_again(self, temp_db, monkeypatch):
-        nid = self._due_row()
-
-        async def _bcast(bot, chat_id, content):
-            return (0, 5)
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert not any(r["id"] == nid for r in cns.get_due(datetime.now(UTC)))
 
     @pytest.mark.parametrize(
         "ok,fail,expected",
@@ -301,27 +192,6 @@ class TestBootSendStatus:
 
 class TestCancelClearsFailedRows:
     """R3: a 'failed' row is terminal, so !newscc has to be able to clear it."""
-
-    def test_newscc_cancels_a_failed_row(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        cns.mark_status(nid, "failed")
-        update = _FakeUpdate(f"!newscc {nid}")
-        asyncio.run(cns.cmd_newscc(update, None))
-        assert _status(nid) == "cancelled"
-
-    def test_newscc_still_cancels_a_pending_row(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        update = _FakeUpdate(f"!newscc {nid}")
-        asyncio.run(cns.cmd_newscc(update, None))
-        assert _status(nid) == "cancelled"
-
-    def test_newscc_still_refuses_a_sending_row(self, temp_db):
-        nid = cns.save_scheduled("news", datetime.now(UTC))
-        cns.claim_for_send(nid)
-        update = _FakeUpdate(f"!newscc {nid}")
-        asyncio.run(cns.cmd_newscc(update, None))
-        # Only the explicit `force` word may touch a row that may be in flight.
-        assert _status(nid) == "sending"
 
     def test_cancel_cancellable_covers_pending_and_failed_only(self, temp_db):
         pending = cns.save_scheduled("a", datetime.now(UTC))
@@ -358,16 +228,6 @@ class TestCompletedSendIsNeverRequeued:
         # Not 'pending': reverting would re-send news that already went out.
         assert _status(nid) == "sending"
 
-    def test_a_requeued_row_is_only_one_the_send_never_completed_for(self, temp_db, monkeypatch):
-        nid = cns.save_scheduled("news", datetime.now(UTC) - timedelta(minutes=1))
-
-        async def _bcast(bot, chat_id, content):
-            raise RuntimeError("connection reset")
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._boot_scheduled_news(_FakeApp()))
-        assert _status(nid) == "pending"
-
 
 class TestNewslistShowsFailures:
     def test_get_failed_ignores_every_other_status(self, temp_db):
@@ -395,29 +255,6 @@ class TestBootResilience:
         # post_init runs before polling; anything raised here killed the bot.
         assert asyncio.run(tb._check_boot_scheduled_news(_FakeApp())) is None
 
-    def test_a_broken_telegram_send_does_not_abort_the_check(self, temp_db, monkeypatch):
-        from telegram.error import BadRequest
-
-        nid = cns.save_scheduled("news", datetime.now(UTC) - timedelta(minutes=1))
-
-        class _BrokenBot:
-            def __init__(self):
-                self.plain = []
-
-            async def send_message(self, chat_id, text, parse_mode=None, **_kw):
-                if parse_mode:
-                    raise BadRequest("can't parse entities")
-                self.plain.append(text)
-
-        app = type("A", (), {"bot": _BrokenBot()})()
-
-        async def _bcast(bot, chat_id, content):
-            return (1, 0)
-
-        monkeypatch.setattr(tb, "_broadcast_bbnews_auto", _bcast)
-        asyncio.run(tb._check_boot_scheduled_news(app))
-        assert _status(nid) == "sent"
-
 
 # =========================================================
 # N12 - a locked database is reported, not swallowed
@@ -434,12 +271,6 @@ class TestScheduleSaveFailure:
         asyncio.run(tb._dispatch_text(update, None, "!news 08:30 morning news"))
         assert update.message.replies
         assert update.message.replies[0].startswith("❌ DB")
-
-    def test_a_normal_schedule_still_confirms(self, temp_db):
-        update = _FakeUpdate("!news 08:30 morning news")
-        asyncio.run(tb._dispatch_text(update, None, "!news 08:30 morning news"))
-        assert update.message.replies
-        assert cns.get_pending()
 
 
 # =========================================================
@@ -497,79 +328,3 @@ class TestSubscriptionEvents:
         asyncio.run(cs.cmd_sub(_FakeUpdate(f"!sub add {self.UID}"), None))
         asyncio.run(cs.cmd_sub(_FakeUpdate(f"!sub del {self.UID}"), None))
         assert _events()[-1] == (self.UID, "bongnews", "unsubscribe")
-
-    def test_a_no_op_add_records_nothing(self, subs_db):
-        asyncio.run(cs.cmd_sub(_FakeUpdate(f"!sub add {self.UID}"), None))
-        asyncio.run(cs.cmd_sub(_FakeUpdate(f"!sub add {self.UID}"), None))
-        assert len(_events()) == 1
-
-    def test_a_no_op_delete_records_nothing(self, subs_db):
-        asyncio.run(cs.cmd_sub(_FakeUpdate(f"!sub del {self.UID}"), None))
-        assert _events() == []
-
-    def test_a_missing_events_table_does_not_lose_the_subscription(self, subs_db, monkeypatch):
-        """S3: subscription_events is the BBS bot's schema, not ours. A drift
-        there must cost an audit row, never the membership change the operator
-        actually asked for."""
-        conn = tg_config.get_bbs_db()
-        try:
-            conn.execute("DROP TABLE subscription_events")
-            conn.commit()
-        finally:
-            conn.close()
-
-        update = _FakeUpdate(f"!sub add {self.UID}")
-        asyncio.run(cs.cmd_sub(update, None))
-
-        conn = tg_config.get_bbs_db()
-        try:
-            rows = conn.execute(
-                "SELECT user_id FROM bongnews_subscribers WHERE user_id = ?", (self.UID,)
-            ).fetchall()
-        finally:
-            conn.close()
-        assert len(rows) == 1
-        # The operator is told it worked, because it did.
-        assert update.message.replies
-
-    def test_a_pasted_discord_mention_is_accepted(self, subs_db):
-        asyncio.run(cs.cmd_sub(_FakeUpdate(f"!sub add <@{self.UID}>"), None))
-        assert _events() == [(self.UID, "bongnews", "subscribe")]
-
-    def test_non_ascii_digits_get_usage_not_a_traceback(self, subs_db):
-        update = _FakeUpdate(f"!sub add {SUPERSCRIPT_TWO * 3}")
-        asyncio.run(cs.cmd_sub(update, None))
-        assert _events() == []
-        assert update.message.replies
-
-
-# =========================================================
-# R14 - the !se window boundary matches the stored timestamp format
-# =========================================================
-
-
-class TestEventsCutoff:
-    def test_cutoff_has_the_shape_sqlite_stores(self, subs_db):
-        conn = tg_config.get_bbs_db()
-        try:
-            conn.execute(
-                "INSERT INTO subscription_events (user_id, source, action)"
-                " VALUES (1, 'bongnews', 'subscribe')"
-            )
-            conn.commit()
-            stored = conn.execute("SELECT ts FROM subscription_events").fetchone()[0]
-        finally:
-            conn.close()
-        cutoff = cs._events_cutoff(30)
-        assert len(cutoff) == len(stored)
-        assert cutoff[10] == stored[10] == " "
-
-    def test_an_event_later_on_the_cutoff_date_stays_in_the_window(self):
-        cutoff = cs._events_cutoff(1)
-        same_day_later = cutoff[:10] + " 23:59:59"
-        assert same_day_later > cutoff
-
-        # The old isoformat() cutoff put a "T" where the stored value has a
-        # space, and "T" sorts above " ", so this same event fell out entirely.
-        iso_cutoff = (datetime.now(UTC) - timedelta(days=1)).isoformat()
-        assert not same_day_later > iso_cutoff

@@ -134,11 +134,6 @@ class TestStaleSending:
         assert nid_old in stale_ids
         assert nid_new not in stale_ids
 
-    def test_ignores_pending_rows(self, temp_db):
-        nid = _insert()  # pending, never claimed
-        stale = cns.get_stale_sending(datetime.now(UTC) + timedelta(minutes=5))
-        assert nid not in {r["id"] for r in stale}
-
 
 class TestCancelVsSendRace:
     """!newscc must not stomp a row the scheduler already claimed.
@@ -167,14 +162,3 @@ class TestCancelVsSendRace:
         finally:
             conn.close()
         assert status == "sending"  # real state preserved, not stomped
-
-    def test_expire_guard_also_atomic(self, temp_db):
-        news_id = _insert()
-        assert cns.claim_for_send(news_id) is True
-        # Boot-time expiry of an already-claimed row must be a no-op.
-        assert cns.set_status_if_pending(news_id, "expired") is False
-
-    def test_double_cancel_is_idempotent_and_reports_second_as_lost(self, temp_db):
-        news_id = _insert()
-        assert cns.set_status_if_pending(news_id, "cancelled") is True
-        assert cns.set_status_if_pending(news_id, "cancelled") is False

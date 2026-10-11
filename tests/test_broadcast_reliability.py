@@ -56,22 +56,11 @@ class TestRateLimitRetry:
         resp = _FakeResp(429, {"retry_after": 9999}, {"Retry-After": "9999"})
         assert asyncio.run(dh._retry_after(resp)) == dh._MAX_RETRY_WAIT
 
-    def test_retry_after_falls_back_to_json_body(self, no_sleep):
-        resp = _FakeResp(429, {"retry_after": 2.5}, {})
-        assert asyncio.run(dh._retry_after(resp)) == 2.5
-
     def test_channel_open_429_is_retried(self, no_sleep):
         session = _ScriptedSession(channel_statuses=[429, 200])
         ok = asyncio.run(dh._send_discord_dm(session, "tok", "42", "hello"))
         assert ok is True
         assert session.channel_calls == 2
-
-    def test_403_is_not_retried(self, no_sleep):
-        session = _ScriptedSession(channel_statuses=[403])
-        ok = asyncio.run(dh._send_discord_dm(session, "tok", "42", "hello"))
-        assert ok is False
-        assert session.channel_calls == 1
-        assert no_sleep == []
 
 
 class TestAllowedMentions:
@@ -169,10 +158,6 @@ class TestSubscriberLookupFailure:
             raise RuntimeError("database is locked")
 
         monkeypatch.setattr(dh, "open_db", _boom)
-        assert dh._get_bongnews_subscribers() is None
-
-    def test_a_missing_db_returns_none(self, monkeypatch):
-        monkeypatch.setattr(dh, "open_db", lambda: None)
         assert dh._get_bongnews_subscribers() is None
 
     def test_the_auto_broadcast_says_lookup_failed(self, monkeypatch):

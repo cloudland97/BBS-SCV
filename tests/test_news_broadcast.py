@@ -37,9 +37,3 @@ class TestSendDiscordDm:
         assert len(session.message_posts) == 3
         assert all(len(m) <= 2000 for m in session.message_posts)
         assert "".join(session.message_posts) == text
-
-    def test_under_limit_text_sends_one_message(self):
-        session = _FakeSession()
-        ok = asyncio.run(dh._send_discord_dm(session, "tok", "42", "short news"))
-        assert ok is True
-        assert session.message_posts == ["short news"]

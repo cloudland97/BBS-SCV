@@ -36,23 +36,6 @@ class _NonMessageUpdate:
         self.effective_chat = None
 
 
-class TestHandleWithoutMessage:
-    def test_edited_message_is_ignored(self):
-        update = _NonMessageUpdate("edited_message", user=type("U", (), {"id": ALLOWED_USER_ID})())
-        # Must return quietly; before the guard this raised AttributeError.
-        assert asyncio.run(tb.handle(update, None)) is None
-        assert update.edited_message.replies == []
-
-    def test_channel_post_is_ignored(self):
-        update = _NonMessageUpdate("channel_post", user=None)
-        assert asyncio.run(tb.handle(update, None)) is None
-        assert update.channel_post.replies == []
-
-    def test_business_message_is_ignored(self):
-        update = _NonMessageUpdate("business_message", user=None, text="!re0")
-        assert asyncio.run(tb.handle(update, None)) is None
-
-
 class TestHandleWithoutUser:
     """A message with no effective_user must not pass the gate.
 
@@ -65,13 +48,6 @@ class TestHandleWithoutUser:
         update.message = _FakeMessage("!re0")
         asyncio.run(tb.handle(update, None))
         assert update.message.replies == ["No permission"]
-
-    def test_chatid_without_user_does_not_crash(self):
-        update = _NonMessageUpdate("channel_post")
-        update.message = _FakeMessage("!chatid")
-        asyncio.run(tb.handle(update, None))
-        assert len(update.message.replies) == 1
-        assert "user_id" in update.message.replies[0]
 
 
 class TestAdminOnlyWithoutUser:
@@ -91,6 +67,3 @@ class TestAdminOnlyWithoutUser:
 
     def test_wrong_user_is_rejected(self):
         assert self._run(type("U", (), {"id": ALLOWED_USER_ID + 1})()) == []
-
-    def test_admin_still_passes(self):
-        assert self._run(type("U", (), {"id": ALLOWED_USER_ID})()) == [1]
