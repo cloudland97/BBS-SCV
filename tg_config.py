@@ -225,7 +225,6 @@ EXPECTED_SHARED_TABLES = (
     "bluearchive_subscribers",
     "booth_subscribers",
     "whale_subscribers",
-    "etf_subscribers",
     "subscription_events",
 )
 
@@ -346,7 +345,5 @@ LOOP_ALERT_THRESHOLDS = {
     # With no entry here it fell to the 180-minute default and reported "no
     # response" for most of every day. 26h leaves headroom for a restart.
     "ark_loop": 1560,
-    # etf_holdings_loop is likewise once-daily (22:00 KST); same 26h reasoning.
-    "etf_holdings_loop": 1560,
 }
 LOOP_ALERT_COOLDOWN_SEC = 6 * 3600  # 6h per loop

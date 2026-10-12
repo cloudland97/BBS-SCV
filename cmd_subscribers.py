@@ -34,9 +34,8 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "bluearchive_subscribers",
             "booth_subscribers",
             "whale_subscribers",
-            "etf_subscribers",
         }
-        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "nickname", "fund"}
+        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "nickname"}
 
         def _rows(table, *cols):
             if table not in _ALLOWED_TABLES:
@@ -57,7 +56,6 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _rows("bluearchive_subscribers", "user_id"),
             _rows("booth_subscribers", "user_id"),
             _rows("whale_subscribers", "user_id"),
-            _rows("etf_subscribers", "user_id", "fund"),
         )
 
     # Queries against the shared bbs.db; off the event loop so a BBS-side
@@ -74,12 +72,11 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bluearchive,
         booth,
         whale,
-        etf,
     ) = await _cfg.db_read_async(_read)
 
     for rows in (bongnews, spurs, market, ark, morning, danawa, pubg):
         all_uids.update(str(r["user_id"]) for r in rows)
-    for rows in (treasury, bluearchive, booth, whale, etf):
+    for rows in (treasury, bluearchive, booth, whale):
         all_uids.update(str(r["user_id"]) for r in rows)
 
     names = await _dh._fetch_discord_usernames(list(all_uids))
@@ -126,7 +123,6 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     _section("MSTR 공시", treasury, lambda uid, _: f"  · {_n(uid)}")
     _section("스마트머니", whale, lambda uid, _: f"  · {_n(uid)}")
-    _section("ETF 보유", etf, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['fund'] for r in rs)}`")
     _section("블루 아카이브", bluearchive, lambda uid, _: f"  · {_n(uid)}")
     _section("Booth", booth, lambda uid, _: f"  · {_n(uid)}")
 
