@@ -122,7 +122,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "PUBG", pubg, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['nickname'] for r in rs)}`"
     )
     _section("MSTR 공시", treasury, lambda uid, _: f"  · {_n(uid)}")
-    _section("스마트머니", whale, lambda uid, _: f"  · {_n(uid)}")
+    _section("버핏·대가 공시", whale, lambda uid, _: f"  · {_n(uid)}")
     _section("블루 아카이브", bluearchive, lambda uid, _: f"  · {_n(uid)}")
     _section("Booth", booth, lambda uid, _: f"  · {_n(uid)}")
 
