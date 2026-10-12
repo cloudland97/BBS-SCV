@@ -32,11 +32,6 @@ _NO_TIME = "NO_TIME"
 _ensured_paths: set[str] = set()
 
 
-def reset_ensure_cache() -> None:
-    """Forget which databases have been migrated (test helper)."""
-    _ensured_paths.clear()
-
-
 def _ensure_table():
     key = str(_cfg.BBS_DB_PATH)
     if key in _ensured_paths:
@@ -173,11 +168,6 @@ def record_unattempted(news_id: int) -> int:
 def forget_attempts(news_id: int) -> None:
     """Drop a row's retry budget once it reaches a state it cannot leave."""
     _send_attempts.pop(news_id, None)
-
-
-def reset_send_attempts() -> None:
-    """Clear every retry budget (test helper)."""
-    _send_attempts.clear()
 
 
 # How far back !newslist looks for failures — older is history, not a to-do,

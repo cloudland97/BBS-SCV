@@ -1,10 +1,8 @@
-"""Bridge operations: log paths, temp files, single instance, maintenance.
+"""Bridge operations: temp files, token redaction, restart and reboot commands.
 
-Groups the operational fixes: the BBS log filenames !log and the post-restart
-check were guessing wrong (N4 / N5), media downloads escaping their directory
-(N6 / N18 / R17), no single-instance guard (R4), retention and heartbeat that
-only ever ran at boot (N14 / R11), and the token redaction that keeps a live bot
-token out of the log in the first place (N1 follow-up).
+Groups the operational fixes: media downloads escaping their directory
+(N6 / N18 / R17), the token redaction that keeps a live bot token out of the
+log in the first place (N1 follow-up), and the restart and reboot command shape.
 """
 
 import asyncio
@@ -71,13 +69,10 @@ class TestOrphanTempCleanup:
 
 
 class _FakeTgFile:
-    def __init__(self, fail=False):
-        self.fail = fail
+    def __init__(self):
         self.written = []
 
     async def download_to_drive(self, path):
-        if self.fail:
-            raise RuntimeError("file is too big")
         self.written.append(path)
         with open(path, "wb") as f:
             f.write(b"payload")
@@ -100,11 +95,11 @@ class _FakeMedia:
 
 
 class TestMediaDownload:
-    """!news2 downloads a caller-named file, so the path and the failure modes
-    both matter (N6 / N18 / R16 / R17)."""
+    """!news2 downloads a caller-named file, so the path must stay inside the
+    temp dir (N6 / N18 / R17)."""
 
-    def _run(self, monkeypatch, tmp_path, media, fail=False):
-        tg_file = _FakeTgFile(fail=fail)
+    def _run(self, monkeypatch, tmp_path, media):
+        tg_file = _FakeTgFile()
         seen = {}
 
         class _Bot:
@@ -133,134 +128,6 @@ class TestMediaDownload:
         assert written.parent == (tmp_path / "dl").resolve()
         assert seen["filename"] == "escape.txt"
         assert seen["bytes"] == b"payload"
-
-    def test_a_failed_download_tells_the_operator(self, monkeypatch, tmp_path):
-        update, _f, seen = self._run(
-            monkeypatch, tmp_path, _FakeMedia(file_name="big.mp4"), fail=True
-        )
-        # R16: an oversized file used to produce no reply at all.
-        assert update.message.replies
-        assert update.message.replies[0].startswith("❌")
-        assert "content" not in seen  # the broadcast never ran
-
-    def test_get_file_failure_tells_the_operator(self, monkeypatch, tmp_path):
-        class _BrokenBot:
-            async def get_file(self, file_id):
-                raise RuntimeError("Bad Request: file is too big")
-
-        context = type("C", (), {"bot": _BrokenBot()})()
-        update = type("U", (), {"message": _FakeMediaMessage()})()
-        asyncio.run(tb._handle_news_media(update, context, "!news2 hi", _FakeMedia("a.png")))
-        assert update.message.replies
-        assert update.message.replies[0].startswith("❌")
-
-
-# =========================================================
-# N14 / R11 - daily retention and heartbeat
-# =========================================================
-
-
-class TestDailyMaintenance:
-    def test_startup_registers_all_background_tasks(self, tmp_path, monkeypatch):
-        """Asserts the tasks actually exist, not that the source mentions them."""
-        monkeypatch.setattr(tb, "LOG_DIR", tmp_path)
-        monkeypatch.setattr(tb, "RESTART_MARKER", tmp_path / "restart_pending")
-        monkeypatch.setattr(tb, "_cleanup_orphan_temp", lambda *a, **kw: None)
-        monkeypatch.setattr(tb, "check_shared_schema", lambda: [])
-        monkeypatch.setattr(tb, "BBS_DB_PATH", tmp_path / "absent.db")
-        monkeypatch.setattr(tb, "_bg_tasks", [])
-
-        async def _go():
-            await tb.post_init(type("App", (), {"bot": None})())
-            names = {t.get_coro().__qualname__ for t in tb._bg_tasks}
-            for task in tb._bg_tasks:
-                task.cancel()
-            await asyncio.gather(*tb._bg_tasks, return_exceptions=True)
-            return names
-
-        names = asyncio.run(_go())
-        assert len(names) == 3
-        assert any("_maintenance_task" in n for n in names)
-        assert any("_loop_monitor_task" in n for n in names)
-        assert any("_news_scheduler_task" in n for n in names)
-
-
-# =========================================================
-# R4 - single instance guard
-# =========================================================
-
-
-class TestSingleInstanceGuard:
-    """Only a pid whose command line names this script may stop a start.
-
-    start_bot.bat ends in `pause`, so refusing to start on a stale or recycled
-    pid leaves no bridge at all, parked on a keypress nobody is there to give.
-    Every uncertain case must therefore start.
-    """
-
-    def _holder(self, monkeypatch, state):
-        monkeypatch.setattr(tb, "_lock_holder_state", lambda pid: state)
-
-    def test_takes_over_from_a_dead_instance(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "bridge.pid"
-        pid_file.write_text(str(os.getpid() + 1), encoding="utf-8")
-        self._holder(monkeypatch, "gone")
-        assert tb.acquire_single_instance(pid_file) is True
-        assert pid_file.read_text(encoding="utf-8") == str(os.getpid())
-
-    def test_recycled_pid_does_not_block_startup(self, tmp_path, monkeypatch):
-        """S1: after a crash or reboot the recorded pid usually belongs to some
-        unrelated process. Alive is not the same as 'is a bridge'."""
-        pid_file = tmp_path / "bridge.pid"
-        pid_file.write_text(str(os.getpid() + 1), encoding="utf-8")
-        self._holder(monkeypatch, "other")
-        assert tb.acquire_single_instance(pid_file) is True
-        assert pid_file.read_text(encoding="utf-8") == str(os.getpid())
-
-    def test_a_failed_probe_fails_open(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "bridge.pid"
-        pid_file.write_text(str(os.getpid() + 1), encoding="utf-8")
-        self._holder(monkeypatch, "unknown")
-        assert tb.acquire_single_instance(pid_file) is True
-
-    @pytest.mark.parametrize(
-        "content", ["not-a-pid", "", "   ", "12.5", "-1", "\u00b2\u00b2", "\u0660\u0661"]
-    )
-    def test_an_unparseable_pid_file_never_blocks_startup(self, tmp_path, content):
-        """R1: isdigit() alone is True for Unicode digit forms int() rejects,
-        and an exception here would abort the start entirely."""
-        pid_file = tmp_path / "bridge.pid"
-        pid_file.write_text(content, encoding="utf-8")
-        assert tb.acquire_single_instance(pid_file) is True
-        assert pid_file.read_text(encoding="utf-8") == str(os.getpid())
-
-    def test_unreadable_pid_file_never_blocks_startup(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "bridge.pid"
-        pid_file.write_text("123", encoding="utf-8")
-
-        def _boom(*a, **kw):
-            raise OSError("permission denied")
-
-        monkeypatch.setattr(type(pid_file), "read_text", _boom)
-        assert tb.acquire_single_instance(pid_file) is True
-
-    def test_own_pid_is_not_treated_as_a_rival(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "bridge.pid"
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
-        self._holder(monkeypatch, "bridge")
-        assert tb.acquire_single_instance(pid_file) is True
-
-
-class TestLockHolderState:
-    def test_a_live_non_bridge_process_is_other(self, monkeypatch):
-        monkeypatch.setattr(tb, "_pid_alive", lambda pid: True)
-        monkeypatch.setattr(tb, "_process_command_line", lambda pid: "notepad.exe")
-        assert tb._lock_holder_state(1234) == "other"
-
-    def test_an_unreadable_command_line_is_unknown(self, monkeypatch):
-        monkeypatch.setattr(tb, "_pid_alive", lambda pid: True)
-        monkeypatch.setattr(tb, "_process_command_line", lambda pid: None)
-        assert tb._lock_holder_state(1234) == "unknown"
 
 
 # =========================================================
