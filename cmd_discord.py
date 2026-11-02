@@ -1,13 +1,11 @@
-"""Commands: Discord bot management (!re, !dm, !ud, !log, !hp)."""
+"""Commands: Discord bot management (!re, !ud, !log, !hp)."""
 
 import asyncio
 import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-import aiohttp
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -131,59 +129,6 @@ async def cmd_drestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
     except Exception as e:
         _cfg.log.warning(f"Post-restart log check failed: {e}")
-
-
-@admin_only
-async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """!sync — Write sync flag to BBS dir and restart Discord bot to sync slash commands."""
-    discord_path = Path(_cfg.PROJECTS["discord"])
-    flag = discord_path / ".sync_flag"
-    try:
-        flag.write_text("sync", encoding="utf-8")
-        _cfg.log.info("sync flag written: %s", flag)
-    except Exception as e:
-        await update.message.reply_text(f"❌ sync 플래그 생성 실패: {e}")
-        return
-    await update.message.reply_text("🔄 sync 플래그 설정. Discord 봇 재시작 중...")
-    await cmd_drestart.__wrapped__(update, context)
-
-
-@admin_only
-async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """!dm <userID> <message> — send a Discord DM to a specific user."""
-    text = (update.message.text or "").strip()
-    rest = text[len("!dm") :].strip()
-    parts = rest.split(" ", 1)
-    user_id = parse_user_id(parts[0]) if parts else None
-    if len(parts) < 2 or user_id is None:
-        await update.message.reply_text(
-            "사용법: `!dm <userID> <message>`\n예시: `!dm 123456789012345678 안녕하세요`",
-            parse_mode="Markdown",
-        )
-        return
-
-    message = parts[1].strip()
-    if not message:
-        await update.message.reply_text("❌ 메시지 내용을 입력해주세요.")
-        return
-
-    token = await _dh._get_discord_token_async()
-    if not token:
-        await update.message.reply_text("❌ Discord 토큰을 찾을 수 없어요.")
-        return
-
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            ok = await _dh._send_discord_dm(session, token, user_id, message)
-        if ok:
-            await update.message.reply_text(f"✅ DM 발송 완료 → `{user_id}`", parse_mode="Markdown")
-            _cfg.log.info(f"DM sent to {user_id}")
-        else:
-            await update.message.reply_text(f"❌ DM 발송 실패 → `{user_id}`", parse_mode="Markdown")
-            _cfg.log.warning(f"DM failed to {user_id}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ 오류: {e}")
-        _cfg.log.error(f"cmd_dm error: {e}")
 
 
 @admin_only

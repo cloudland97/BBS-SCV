@@ -44,9 +44,7 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 | `!newscc <ID> force` | Force-release a row stuck in `sending` (e.g. after a crash mid-broadcast) back to `cancelled` |
 | `!sub [list\|add\|del] [ID]` | Manage news subscribers |
 | `!se [userID] [Nd]` | Subscription event log (default: last 30d, global) |
-| `!dm userID message` | Send Discord DM |
 | `!ud [userID]` | View user DM logs |
-| `!sync` | Write sync flag and restart Discord bot to sync slash commands |
 
 ## Architecture
 

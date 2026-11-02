@@ -219,12 +219,10 @@ EXPECTED_SHARED_TABLES = (
     "market_subscribers",
     "ark_subscribers",
     "morning_subscribers",
-    "danawa_subscriptions",
     "pubg_subscribers",
     "treasury_subscribers",
     "bluearchive_subscribers",
     "booth_subscribers",
-    "whale_subscribers",
     "subscription_events",
 )
 
@@ -330,7 +328,6 @@ async def fetch_rows_async(sql: str, params: tuple = ()) -> list:
 # Loop monitor thresholds (minutes)
 LOOP_ALERT_THRESHOLDS = {
     "market_loop": 120,
-    "danawa_loop": 180,
     "morning_loop": 180,
     "feed_loop": 60,
     "pubg_daily_loop": 1440,

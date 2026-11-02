@@ -28,14 +28,12 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "market_subscribers",
             "ark_subscribers",
             "morning_subscribers",
-            "danawa_subscriptions",
             "pubg_subscribers",
             "treasury_subscribers",
             "bluearchive_subscribers",
             "booth_subscribers",
-            "whale_subscribers",
         }
-        _ALLOWED_COLS = {"user_id", "mode", "cities", "name", "nickname"}
+        _ALLOWED_COLS = {"user_id", "mode", "cities", "nickname"}
 
         def _rows(table, *cols):
             if table not in _ALLOWED_TABLES:
@@ -50,12 +48,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _rows("market_subscribers", "user_id", "mode"),
             _rows("ark_subscribers", "user_id"),
             _rows("morning_subscribers", "user_id", "cities"),
-            _rows("danawa_subscriptions", "user_id", "name"),
             _rows("pubg_subscribers", "user_id", "nickname"),
             _rows("treasury_subscribers", "user_id"),
             _rows("bluearchive_subscribers", "user_id"),
             _rows("booth_subscribers", "user_id"),
-            _rows("whale_subscribers", "user_id"),
         )
 
     # Queries against the shared bbs.db; off the event loop so a BBS-side
@@ -66,17 +62,15 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         market,
         ark,
         morning,
-        danawa,
         pubg,
         treasury,
         bluearchive,
         booth,
-        whale,
     ) = await _cfg.db_read_async(_read)
 
-    for rows in (bongnews, spurs, market, ark, morning, danawa, pubg):
+    for rows in (bongnews, spurs, market, ark, morning, pubg):
         all_uids.update(str(r["user_id"]) for r in rows)
-    for rows in (treasury, bluearchive, booth, whale):
+    for rows in (treasury, bluearchive, booth):
         all_uids.update(str(r["user_id"]) for r in rows)
 
     names = await _dh._fetch_discord_usernames(list(all_uids))
@@ -111,18 +105,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"  · {_n(r['user_id'])} — {city_str}")
     lines.append("")
 
-    danawa_uids = sorted({r["user_id"] for r in danawa})
-    lines.append(f"*다나와* ({len(danawa_uids)}명)")
-    for uid in danawa_uids:
-        items = md_escape(", ".join(r["name"] for r in danawa if r["user_id"] == uid))
-        lines.append(f"  · {_n(uid)} — {items}")
-    lines.append("")
-
     _section(
         "PUBG", pubg, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['nickname'] for r in rs)}`"
     )
     _section("MSTR 공시", treasury, lambda uid, _: f"  · {_n(uid)}")
-    _section("버핏·대가 공시", whale, lambda uid, _: f"  · {_n(uid)}")
     _section("블루 아카이브", bluearchive, lambda uid, _: f"  · {_n(uid)}")
     _section("Booth", booth, lambda uid, _: f"  · {_n(uid)}")
 
