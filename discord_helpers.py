@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -13,10 +15,11 @@ from tg_config import (
     DISCORD_API,
     DISCORD_DATA_PATH,
     DISCORD_ENV_PATH,
+    KST,
     log,
     open_db,
 )
-from tg_utils import split_message
+from tg_utils import split_message, u16_len
 
 # Cap Discord API calls so a hung request can't stall a broadcast for minutes
 # (aiohttp's default total timeout is 300s).
@@ -162,6 +165,48 @@ _MAX_RETRY_WAIT = 10.0
 # or a role mention inside a news item would ping every recipient's server.
 _ALLOWED_MENTIONS = {"parse": []}
 
+_NEWS_COLOR = 0xE67E22
+# Discord caps an embed description at 4096; longer news falls back to chunked plain text.
+_NEWS_EMBED_MAX = 4000
+_NEWS_PREVIEW_MAX = 80
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+
+def _plain_line(line: str) -> str:
+    """One line with Discord markdown removed, for the push preview (lock screens show raw markup)."""
+    line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+    line = re.sub(r"^\s*(?:-#|#+|>+)\s*", "", line)
+    line = re.sub(r"\|\|.*?\|\|", "", line)
+    line = re.sub(r"<a?:(\w+):\d+>", r":\1:", line)
+    line = re.sub(r"(\*\*|__|~~|\*|_|`)(.+?)\1", r"\2", line)
+    if re.fullmatch(r"[-*_=\s]*", line):
+        return ""
+    return re.sub(r"\s+", " ", line).strip()
+
+
+def _news_message(content: str, filename: Optional[str] = None, now: Optional[datetime] = None):
+    """Return (text, embed, upload_name) for one bongnews DM; embed is None on the long plain-text path."""
+    body = content.strip()
+    if u16_len(body) > _NEWS_EMBED_MAX:
+        return f"**bongnews**\n\n{content}", None, filename
+    d = (now or datetime.now(KST)).astimezone(KST)
+    embed = {"title": f"📰 {d.month}.{d.day} 봉봉뉴스", "color": _NEWS_COLOR}
+    if body:
+        embed["description"] = body
+    text = "📰 봉봉뉴스"
+    first = next(filter(None, map(_plain_line, body.split("\n"))), "")
+    if first:
+        if len(first) > _NEWS_PREVIEW_MAX:
+            first = first[: _NEWS_PREVIEW_MAX - 1] + "…"
+        text += f" · {first}"
+    upload_name = filename
+    ext = Path(filename).suffix.lower() if filename else ""
+    if ext in _IMAGE_EXTS:
+        # attachment:// must match the stored name exactly, and Discord rewrites spaces/non-ASCII.
+        upload_name = f"bongnews{ext}"
+        embed["image"] = {"url": f"attachment://{upload_name}"}
+    return text, embed, upload_name
+
 
 async def _retry_after(response) -> float:
     """Seconds to wait after a 429, from the Retry-After header or JSON body."""
@@ -234,22 +279,24 @@ async def _send_discord_dm(
     text,
     file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
+    embed: Optional[dict] = None,
 ):
     headers = {"Authorization": f"Bot {token}"}
     channel_id = await _open_dm_channel(session, headers, user_id)
     if channel_id is None:
         return False
 
-    chunks = split_message(text, limit=_DISCORD_CONTENT_LIMIT)
+    chunks = [text] if embed else split_message(text, limit=_DISCORD_CONTENT_LIMIT)
     msg_url = f"{DISCORD_API}/channels/{channel_id}/messages"
 
-    async def _post_text(content: str) -> bool:
-        status = await _post_message(
-            session,
-            msg_url,
-            headers,
-            json_body={"content": content, "allowed_mentions": _ALLOWED_MENTIONS},
-        )
+    def _body(content: str, first: bool) -> dict:
+        body = {"content": content, "allowed_mentions": _ALLOWED_MENTIONS}
+        if first and embed:
+            body["embeds"] = [embed]
+        return body
+
+    async def _post_text(content: str, first: bool = False) -> bool:
+        status = await _post_message(session, msg_url, headers, json_body=_body(content, first))
         return status in (200, 201)
 
     if file_bytes and filename:
@@ -259,7 +306,7 @@ async def _send_discord_dm(
         form = aiohttp.FormData()
         form.add_field(
             "payload_json",
-            json.dumps({"content": chunks[0], "allowed_mentions": _ALLOWED_MENTIONS}),
+            json.dumps(_body(chunks[0], True)),
             content_type="application/json",
         )
         ext = Path(filename).suffix.lower()
@@ -276,7 +323,7 @@ async def _send_discord_dm(
             return False
         rest = chunks[1:]
     else:
-        if not await _post_text(chunks[0]):
+        if not await _post_text(chunks[0], True):
             return False
         rest = chunks[1:]
 
@@ -286,13 +333,15 @@ async def _send_discord_dm(
     return True
 
 
-async def _send_all(session, token, subscribers, msg_text, file_bytes, filename):
+async def _send_all(session, token, subscribers, msg_text, file_bytes, filename, embed=None):
     """Fan out one DM per subscriber, at most _DM_CONCURRENCY at a time."""
     sem = asyncio.Semaphore(_DM_CONCURRENCY)
 
     async def _one(uid):
         async with sem:
-            return await _send_discord_dm(session, token, uid, msg_text, file_bytes, filename)
+            return await _send_discord_dm(
+                session, token, uid, msg_text, file_bytes, filename, embed
+            )
 
     return await asyncio.gather(*[_one(uid) for uid in subscribers], return_exceptions=True)
 
@@ -328,10 +377,12 @@ async def _broadcast_bbnews(
     await _save_latest_async(content)
 
     status_msg = await update.message.reply_text(f"Sending to {len(subscribers)} subscribers..")
-    msg_text = f"**bongnews**\n\n{content}"
+    msg_text, embed, upload_name = _news_message(content, filename)
 
     async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as session:
-        results = await _send_all(session, token, subscribers, msg_text, file_bytes, filename)
+        results = await _send_all(
+            session, token, subscribers, msg_text, file_bytes, upload_name, embed
+        )
     ok = sum(1 for r in results if r is True)
     failed_uids = [str(subscribers[i]) for i, r in enumerate(results) if r is not True]
 
@@ -369,9 +420,11 @@ async def _broadcast_bbnews_auto(
 
     await _save_latest_async(content)
 
-    msg_text = f"**bongnews**\n\n{content}"
+    msg_text, embed, upload_name = _news_message(content, filename)
     async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as session:
-        results = await _send_all(session, token, subscribers, msg_text, file_bytes, filename)
+        results = await _send_all(
+            session, token, subscribers, msg_text, file_bytes, upload_name, embed
+        )
     ok = sum(1 for r in results if r is True)
     failed_uids = [str(subscribers[i]) for i, r in enumerate(results) if r is not True]
     summary = f"📤 예약 뉴스 발송 완료: {ok}/{len(subscribers)}"
