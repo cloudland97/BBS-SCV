@@ -8,16 +8,15 @@ Split modules:
 
 import asyncio
 import atexit
+import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import Update
@@ -34,28 +33,90 @@ from telegram.request import HTTPXRequest
 from tg_config import (
     ALLOWED_USER_ID,
     BBS_DB_PATH,
+    BBS_DOWN_THRESHOLD_MIN,
     BOT_TOKEN,
     LOG_DIR,
     LOOP_ALERT_COOLDOWN_SEC,
+    LOOP_ALERT_DEFAULT_MIN,
+    LOOP_ALERT_STATE_PATH,
     LOOP_ALERT_THRESHOLDS,
     PROJECTS,
     RESTART_MARKER,
     check_shared_schema,
+    fetch_rows_async,
     get_bbs_db,
     log,
+    redact_tokens,
 )
-from tg_utils import ensure_utc, md_escape, safe_reply, safe_send
-from discord_helpers import _broadcast_bbnews, _broadcast_bbnews_auto
-import cmd_news_schedule as _cns
+from tg_utils import ensure_utc, is_authorized, safe_reply, safe_send
+from discord_helpers import _broadcast_bbnews
 
 
 # -- Loop monitor --
 
-_loop_alert_last: dict[str, float] = {}
+# State key for the whole-bot rule; loop ids all end in "_loop", so it cannot collide.
+_BBS_DOWN_KEY = "__bbs_down__"
+
+
+def _load_alert_state() -> dict[str, float]:
+    """{key: last alert epoch} for every key currently alerted as stale."""
+    try:
+        data = json.loads(LOOP_ALERT_STATE_PATH.read_text(encoding="utf-8"))
+        return {str(k): float(v) for k, v in data.items()}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        log.warning(f"Loop alert state unreadable, starting empty: {e}")
+        return {}
+
+
+def _save_alert_state(state: dict[str, float]) -> None:
+    try:
+        tmp = LOOP_ALERT_STATE_PATH.with_name(LOOP_ALERT_STATE_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, LOOP_ALERT_STATE_PATH)
+    except Exception as e:
+        log.warning(f"Loop alert state write failed: {e}")
+
+
+def _fmt_age(mins: float) -> str:
+    h, m = int(mins // 60), int(mins % 60)
+    return f"{h}h{m}m" if h else f"{m}m"
+
+
+def _cooldown_over(state: dict[str, float], key: str, now_ts: float) -> bool:
+    return key not in state or now_ts - state[key] > LOOP_ALERT_COOLDOWN_SEC
+
+
+def _evaluate_loops(ages: dict[str, float], state: dict[str, float], now_ts: float):
+    """Return (alerts, recoveries) for loop ages in minutes; updates *state* in place.
+
+    While the whole bot is down only that one alert is raised, not one per loop.
+    """
+    alerts, recoveries = [], []
+    if not ages:
+        return alerts, recoveries
+    newest = min(ages.values())
+    if newest > BBS_DOWN_THRESHOLD_MIN:
+        if _cooldown_over(state, _BBS_DOWN_KEY, now_ts):
+            state[_BBS_DOWN_KEY] = now_ts
+            alerts.append(f"🛑 BBS bot down — no loop has run for {_fmt_age(newest)}")
+        return alerts, recoveries
+    if state.pop(_BBS_DOWN_KEY, None) is not None:
+        recoveries.append("✅ BBS bot loops running again")
+    for loop_id, mins in sorted(ages.items()):
+        if mins > LOOP_ALERT_THRESHOLDS.get(loop_id, LOOP_ALERT_DEFAULT_MIN):
+            if _cooldown_over(state, loop_id, now_ts):
+                state[loop_id] = now_ts
+                alerts.append(f"⚠️ `{loop_id}` — {_fmt_age(mins)} no response")
+        elif state.pop(loop_id, None) is not None:
+            recoveries.append(f"✅ `{loop_id}` recovered")
+    return alerts, recoveries
 
 
 async def _loop_monitor_task(app):
-    """Background task: alert if a loop hasn't run within its threshold."""
+    """Background task: alert on stale loops or a down bot, and again on recovery."""
+    state = _load_alert_state()
     await asyncio.sleep(60)
     while True:
         await asyncio.sleep(300)
@@ -63,238 +124,73 @@ async def _loop_monitor_task(app):
             continue
         try:
             now_utc = datetime.now(timezone.utc)
-            conn = get_bbs_db()
-            try:
-                rows = conn.execute("SELECT loop_id, last_run FROM loop_health").fetchall()
-            finally:
-                conn.close()
-
-            alerts = []
-            for row in rows:
-                loop_id = row["loop_id"]
-                threshold_mins = LOOP_ALERT_THRESHOLDS.get(loop_id, 180)
-                last_dt = ensure_utc(datetime.fromisoformat(row["last_run"]))
-                diff_mins = (now_utc - last_dt).total_seconds() / 60
-                if diff_mins > threshold_mins:
-                    last_alerted = _loop_alert_last.get(loop_id, 0)
-                    if time.time() - last_alerted > LOOP_ALERT_COOLDOWN_SEC:
-                        _loop_alert_last[loop_id] = time.time()
-                        h, m = int(diff_mins // 60), int(diff_mins % 60)
-                        age = f"{h}h{m}m" if h else f"{m}m"
-                        alerts.append(f"⚠️ `{loop_id}` — {age} no response")
-
+            rows = await fetch_rows_async("SELECT loop_id, last_run FROM loop_health")
+            ages = {
+                row["loop_id"]: (
+                    now_utc - ensure_utc(datetime.fromisoformat(row["last_run"]))
+                ).total_seconds()
+                / 60
+                for row in rows
+            }
+            before = dict(state)
+            alerts, recoveries = _evaluate_loops(ages, state, time.time())
+            if state != before:
+                await asyncio.to_thread(_save_alert_state, dict(state))
             if alerts:
-                msg = "Loop down detected\n\n" + "\n".join(alerts)
-                await app.bot.send_message(chat_id=ALLOWED_USER_ID, text=msg, parse_mode="Markdown")
+                await safe_send(
+                    app.bot, ALLOWED_USER_ID, "Loop down detected\n\n" + "\n".join(alerts)
+                )
                 log.warning(f"Loop alert: {alerts}")
+            if recoveries:
+                await safe_send(app.bot, ALLOWED_USER_ID, "\n".join(recoveries))
+                log.info(f"Loop recovered: {recoveries}")
         except Exception as e:
             log.error(f"Loop monitor error: {e}")
 
 
-# -- News scheduler --
+# -- Scheduled news: leftover rows are reported at boot, never sent --
 
 
-def _send_status(news_id, ok_count: int, fail_count: int) -> str:
-    """(ok, fail) -> 'sent' / 'failed' / 'pending' (the (0,0) case, up to MAX_UNATTEMPTED_ATTEMPTS)."""
-    if ok_count:
-        _cns.forget_attempts(news_id)
-        return "sent"
-    if fail_count:
-        _cns.forget_attempts(news_id)
-        return "failed"
-    if _cns.record_unattempted(news_id) >= _cns.MAX_UNATTEMPTED_ATTEMPTS:
-        _cns.forget_attempts(news_id)
-        return "failed"
-    return "pending"
-
-
-async def _report_send_outcome(bot, label: str, news_id, ok_count, fail_count, status) -> None:
-    """Log a broadcast result, and tell the operator once when retrying stops.
-
-    'failed' with fail_count 0 means the retry budget was exhausted (a real
-    delivery failure always attempts >=1 recipient) — the one case worth a message.
-    """
-    if status == "sent":
-        return
-    if status == "failed" and fail_count:
-        log.error(
-            "%s news id=%s reached no subscriber (%d attempted, all failed)",
-            label,
-            news_id,
-            fail_count,
-        )
-        return
-    if status == "failed":
-        log.error(
-            "%s news id=%s not attempted %d times; giving up",
-            label,
-            news_id,
-            _cns.MAX_UNATTEMPTED_ATTEMPTS,
-        )
-        await safe_send(
-            bot,
-            ALLOWED_USER_ID,
-            f"❌ 예약 뉴스 `[{news_id}]` 발송 포기: "
-            f"{_cns.MAX_UNATTEMPTED_ATTEMPTS}회 시도했지만 보낼 대상이 없었습니다 "
-            "(Discord 토큰 없음 또는 봉봉뉴스 구독자 없음). `failed` 처리되어 "
-            "재시도하지 않습니다. 원인 해결 후 `!news`로 다시 예약하세요.",
-        )
-        return
-    log.warning(
-        "%s news id=%s was not attempted (no token or no subscribers); "
-        "left pending for the next cycle",
-        label,
-        news_id,
-    )
-
-
-async def _check_boot_scheduled_news(app):
-    """Run the boot news check without ever aborting startup — post_init runs
-    before polling begins, so anything raised in here would kill the bot outright."""
+def _count_pending_scheduled_news() -> int:
+    conn = get_bbs_db()
     try:
-        await _boot_scheduled_news(app)
-    except Exception as e:
-        log.error(f"Boot scheduled-news check failed: {e}", exc_info=True)
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_news'"
+        ).fetchone():
+            return 0
+        return conn.execute(
+            "SELECT COUNT(*) FROM scheduled_news WHERE status = 'pending'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
 
 
-async def _boot_scheduled_news(app):
-    """On boot: send news due within 15 min; expire and notify anything older.
-
-    Also detect rows orphaned in 'sending' by a crash mid-send and warn the admin.
-    This is detect-and-notify only — never auto-resend, because a crash AFTER a
-    successful broadcast (but before mark 'sent') would otherwise double-send.
-    """
-    now_utc = datetime.now(timezone.utc)
-    KST = ZoneInfo("Asia/Seoul")
-
-    # Stale-'sending' recovery: rows claimed >5 min ago that never reached 'sent'.
-    # A human decides whether they actually went out; we only surface them.
-    stale = await _cns.a_get_stale_sending(now_utc - timedelta(minutes=5))
-    if stale:
-        lines = [
-            f"⚠️ 발송 중(sending) 상태로 멈춘 예약 뉴스 {len(stale)}건 — 발송 여부 수동 확인 필요:"
-        ]
-        for item in stale:
-            claimed_kst = (
-                datetime.fromisoformat(item["claimed_at"])
-                .replace(tzinfo=timezone.utc)
-                .astimezone(KST)
-            )
-            lines.append(
-                f"• `[{item['id']}]` {claimed_kst.strftime('%m/%d %H:%M')} claimed — {md_escape(item['content'][:30])}..."
-            )
-        await safe_send(app.bot, ALLOWED_USER_ID, "\n".join(lines))
-
+async def _warn_pending_scheduled_news() -> None:
+    """Boot-time WARNING for 'pending' rows left by the removed scheduler; they are never sent."""
     try:
-        unclaimed = await _cns.a_get_unclaimed_sending()
-        if unclaimed:
-            ids = ", ".join(f"`[{r['id']}]`" for r in unclaimed)
-            await safe_send(
-                app.bot,
-                ALLOWED_USER_ID,
-                f"❌ `claimed_at` 없이 발송 중(sending)인 예약 뉴스: {ids} "
-                "— 클레임 기록 누락. 발송 여부 확인 후 `!newscc <id> force`로 해제.",
-            )
-    except Exception as e:
-        log.error(f"Claim invariant check failed: {e}", exc_info=True)
-
-    cutoff = now_utc - timedelta(minutes=15)
-    due = await _cns.a_get_due(now_utc)
-    if not due:
+        count = await asyncio.to_thread(_count_pending_scheduled_news)
+    except Exception as e:  # runs in post_init, which must never abort startup
+        log.warning(f"scheduled_news check failed: {e}")
         return
-
-    send_now, expired = [], []
-    for item in due:
-        fired_at = datetime.fromisoformat(item["scheduled_at"]).replace(tzinfo=timezone.utc)
-        (send_now if fired_at >= cutoff else expired).append(item)
-
-    if expired:
-        lines = [f"⚠️ 봇 다운 중 만료된 예약 뉴스 {len(expired)}건:"]
-        for item in expired:
-            dt_kst = (
-                datetime.fromisoformat(item["scheduled_at"])
-                .replace(tzinfo=timezone.utc)
-                .astimezone(KST)
-            )
-            lines.append(
-                f"• `[{item['id']}]` {dt_kst.strftime('%m/%d %H:%M')} — {md_escape(item['content'][:30])}..."
-            )
-            await _cns.a_set_status_if_pending(item["id"], "expired")
-        await safe_send(app.bot, ALLOWED_USER_ID, "\n".join(lines))
-
-    for item in send_now:
-        # Same claim-before-send guard as the 30s loop (the scheduler task also
-        # starts on boot, so both could race the same due row).
-        if not await _cns.a_claim_for_send(item["id"]):
-            continue
-        sent_ok = False
-        try:
-            ok_count, fail_count = await _broadcast_bbnews_auto(
-                app.bot, ALLOWED_USER_ID, item["content"]
-            )
-            # The DMs are out. Nothing after this point may re-queue the row.
-            sent_ok = True
-            status = _send_status(item["id"], ok_count, fail_count)
-            await _cns.a_mark_status(item["id"], status)
-            await _report_send_outcome(app.bot, "Boot", item["id"], ok_count, fail_count, status)
-        except Exception as e:
-            if sent_ok:
-                # Only the status write failed. Leave the row 'sending' —
-                # terminal for the scheduler (get_due is pending-only), so !newslist surfaces it for a human.
-                log.error(f"Boot scheduled news status write failed id={item['id']}: {e}")
-            else:
-                # Send did not complete -> back to 'pending' for retry.
-                await _cns.a_mark_status(item["id"], "pending")
-                log.error(f"Boot scheduled news send failed id={item['id']}: {e}")
-
-
-async def _news_scheduler_task(app):
-    """Background task: fire scheduled news when due (checks every 30s)."""
-    await asyncio.sleep(30)
-    while True:
-        await asyncio.sleep(30)
-        if not BBS_DB_PATH.exists():
-            continue  # standalone clone / BBS bot not set up yet
-        try:
-            due = await _cns.a_get_due(datetime.now(timezone.utc))
-            for item in due:
-                # Claim BEFORE broadcasting: only one winner flips 'pending' ->
-                # 'sending', so get_due won't re-pick this row next cycle -> no
-                # duplicate. A lost claim means another cycle already has it.
-                if not await _cns.a_claim_for_send(item["id"]):
-                    continue
-                log.info(f"Sending scheduled news id={item['id']}")
-                sent_ok = False
-                try:
-                    ok_count, fail_count = await _broadcast_bbnews_auto(
-                        app.bot, ALLOWED_USER_ID, item["content"]
-                    )
-                    # The DMs are out. Nothing after this point may re-queue it.
-                    sent_ok = True
-                    status = _send_status(item["id"], ok_count, fail_count)
-                    await _cns.a_mark_status(item["id"], status)
-                    await _report_send_outcome(
-                        app.bot, "Scheduled", item["id"], ok_count, fail_count, status
-                    )
-                except Exception as e:
-                    if sent_ok:
-                        # Only the status write failed; the row stays 'sending',
-                        # which get_due never re-picks, so it is not re-sent.
-                        log.error(f"Scheduled news status write failed id={item['id']}: {e}")
-                    else:
-                        # Send did NOT complete -> revert to 'pending' so it retries.
-                        await _cns.a_mark_status(item["id"], "pending")
-                        log.error(f"Scheduled news send failed id={item['id']}: {e}")
-        except Exception as e:
-            log.error(f"News scheduler error: {e}")
+    if count:
+        log.warning(
+            "scheduled_news holds %d 'pending' row(s); scheduling was removed, so they "
+            "will not be sent (rows left untouched)",
+            count,
+        )
 
 
 # -- Photo / video / document handlers --
 
 
+def _is_news2(caption: str) -> bool:
+    """Exact command word, so "!news2x ..." never broadcasts."""
+    return caption.split(maxsplit=1)[:1] == ["!news2"]
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
-    if caption.startswith("!news2"):
+    if _is_news2(caption):
         await _handle_news_media(update, context, caption, update.message.photo[-1])
         return
     await update.message.reply_text("Use `!news2 content` caption to broadcast photo via bongnews.")
@@ -302,7 +198,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
-    if caption.startswith("!news2"):
+    if _is_news2(caption):
         await _handle_news_media(update, context, caption, update.message.document)
         return
     await update.message.reply_text(
@@ -312,7 +208,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
-    if caption.startswith("!news2"):
+    if _is_news2(caption):
         await _handle_news_media(update, context, caption, update.message.video)
         return
     await update.message.reply_text("Use `!news2 content` caption to broadcast video via bongnews.")
@@ -321,14 +217,14 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -- Bongnews commands --
 
 
+_NEWS_USAGE = "Usage:\n• `!news content` — text only\n• `!news2 content` — with media"
+
+
 async def cmd_bbnews_text(update: Update, content: str):
-    """Handle !news text command."""
+    """Handle !news text command: broadcast now, exactly as written."""
     content = content.replace("\\n", "\n")
-    if not content:
-        await update.message.reply_text(
-            "Usage:\n• `!news content` — text only\n• `!news2 content` — with media",
-            parse_mode="Markdown",
-        )
+    if not content.strip():
+        await update.message.reply_text(_NEWS_USAGE, parse_mode="Markdown")
         return
     await _broadcast_bbnews(update, content)
 
@@ -353,7 +249,9 @@ async def _handle_news_media(
         # Telegram refuses files over 20MB with a BadRequest, so reply with the
         # error rather than dropping it silently.
         log.warning(f"news2 get_file failed: {e}")
-        await safe_reply(update.message, f"❌ 미디어 다운로드 실패: {e}", parse_mode=None)
+        await safe_reply(
+            update.message, f"❌ 미디어 다운로드 실패: {redact_tokens(str(e))}", parse_mode=None
+        )
         return
 
     fname = getattr(media, "file_name", None)
@@ -369,7 +267,9 @@ async def _handle_news_media(
         await _broadcast_bbnews(update, content, file_bytes, tmp.name)
     except Exception as e:
         log.warning(f"news2 media broadcast failed: {e}")
-        await safe_reply(update.message, f"❌ 미디어 발송 실패: {e}", parse_mode=None)
+        await safe_reply(
+            update.message, f"❌ 미디어 발송 실패: {redact_tokens(str(e))}", parse_mode=None
+        )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -378,62 +278,26 @@ async def _handle_news_media(
 
 
 async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: str):
-    """Dispatch a text command using prefix table (longer/specific entries first)."""
-    # Special cases that need local argument parsing
-    if t.startswith("!newslist"):
-        await _cns.cmd_newslist(update, context)
+    """Dispatch a text command by its exact first token."""
+    parts = t.split(maxsplit=1)
+    cmd = parts[0] if parts else ""
+    if cmd == "!news":
+        await cmd_bbnews_text(update, parts[1] if len(parts) > 1 else "")
         return
-    if t.startswith("!newscc"):
-        await _cns.cmd_newscc(update, context)
+    if cmd == "!news2":
+        # Media captions are handled by handle_photo/video/document; text alone sends nothing.
+        await update.message.reply_text(_NEWS_USAGE, parse_mode="Markdown")
         return
-    if t.startswith("!news2"):
-        await cmd_bbnews_text(update, t[len("!news2") :].strip())
-        return
-    if t.startswith("!news"):
-        raw = t[len("!news") :].strip()
-        try:
-            scheduled_at, content = _cns.parse_schedule_time(raw)
-            if not content:
-                await update.message.reply_text("내용을 입력해주세요.")
-                return
-            news_id = await _cns.a_save_scheduled(content, scheduled_at)
-            dt_kst = scheduled_at.astimezone(ZoneInfo("Asia/Seoul"))
-            await safe_reply(
-                update.message,
-                f"✅ 예약됨 `[{news_id}]`\n"
-                f"📅 {dt_kst.strftime('%m/%d(%a) %H:%M')} KST\n"
-                f"📝 {content[:60]}",
-                parse_mode="Markdown",
-            )
-        except sqlite3.OperationalError as e:
-            # save_scheduled is deliberately single-attempt (retrying an
-            # INSERT could double-schedule), so a locked DB must surface here, not fail silently.
-            log.error(f"save_scheduled failed: {e}")
-            await update.message.reply_text(
-                "❌ DB 사용 중 — 뉴스가 예약되지 않았습니다. 잠시 후 다시 시도하세요."
-            )
-        except ValueError as e:
-            if str(e) == _cns._NO_TIME:
-                await cmd_bbnews_text(update, raw)
-            else:
-                await update.message.reply_text(
-                    f"❌ {e}\n\n{_cns.TIME_FORMAT_HELP}", parse_mode="Markdown"
-                )
-        return
-    # Exact first-token lookup: the command word is matched directly, so a short
-    # command can no longer shadow a longer one that shares its prefix
-    # (e.g. "!re0" is no longer intercepted by "!re").
-    cmd = t.split(maxsplit=1)[0]
     handler = _CMD_TABLE.get(cmd)
     if handler is not None:
         await handler(update, context)
         return
 
-    # Fallback for attached-argument forms with no space (e.g. "!log1", "!st7d"):
-    # preserve the historical longest-prefix-first startswith behavior.
-    for prefix, h in _CMD_ROUTES:
-        if t.startswith(prefix):
-            await h(update, context)
+    # Attached-argument forms with no space (e.g. "!log1", "!st7d"). Only commands
+    # that parse such an argument; "!re" must stay exact or "!res" restarts the bot.
+    for prefix in _ATTACHED_ARG_PREFIXES:
+        if cmd.startswith(prefix):
+            await _CMD_TABLE[prefix](update, context)
             return
 
     await update.message.reply_text("Unknown command. `!help` 참조.", parse_mode="Markdown")
@@ -456,8 +320,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         return
-    # effective_user is None for channel posts, which must not pass the gate.
-    if user is None or user.id != ALLOWED_USER_ID:
+    if not is_authorized(update):
         await message.reply_text("No permission")
         return
     if message.photo:
@@ -723,10 +586,9 @@ async def post_init(application):
     _cleanup_orphan_temp()
     check_shared_schema()
     _bg_tasks.append(asyncio.create_task(_loop_monitor_task(application)))
-    _bg_tasks.append(asyncio.create_task(_news_scheduler_task(application)))
     _bg_tasks.append(asyncio.create_task(_maintenance_task()))
     if BBS_DB_PATH.exists():
-        await _check_boot_scheduled_news(application)
+        await _warn_pending_scheduled_news()
     else:
         # A standalone clone has no sibling BBS repo; connecting anyway would
         # raise inside post_init and kill the bot before polling ever starts.
@@ -768,12 +630,9 @@ import cmd_discord as _cd  # noqa: E402
 import cmd_subscribers as _cs  # noqa: E402
 import cmd_moderation as _cm  # noqa: E402
 
-# Dispatch table for text commands — longer/more-specific prefixes must come first
-# to prevent shorter prefixes from shadowing them (e.g. "!re0" before "!re").
+# Text commands, matched on the exact first token.
 _CMD_ROUTES: list[tuple[str, object]] = [
     ("!reboot", _cm.cmd_reboot),
-    # Typo guard: "!rebot"/"!reboo" must reach the reboot usage text, not fall through to "!re".
-    ("!reb", _cm.cmd_reboot),
     ("!re0", _cm.cmd_restart),
     ("!re", _cd.cmd_drestart),
     ("!list", _cs.cmd_list),
@@ -786,9 +645,10 @@ _CMD_ROUTES: list[tuple[str, object]] = [
     ("!se", _cs.cmd_sub_events),
 ]
 
-# Exact-match table built from the ordered routes above. The list is kept as the
-# fallback source of truth for attached-argument (spaceless) command forms.
 _CMD_TABLE: dict[str, object] = dict(_CMD_ROUTES)
+
+# Handlers that slice their argument off text[len(prefix):], so "!st7d" works unspaced.
+_ATTACHED_ARG_PREFIXES = ("!log", "!st", "!se", "!ud")
 
 
 async def _cmd_help_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -796,13 +656,24 @@ async def _cmd_help_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Quiet transient polling errors; full traceback only for real bugs."""
+    """Quiet transient polling errors; report every handler failure to the operator."""
     err = context.error
-    if isinstance(err, (NetworkError, TimedOut)):
-        # Telegram-side hiccup (Bad Gateway, timeout) — PTB auto-retries.
+    # PTB passes update=None for getUpdates errors, which it retries by itself.
+    if update is None and isinstance(err, (NetworkError, TimedOut)):
         log.warning(f"Transient network error (auto-retry): {err}")
         return
     log.error("Unhandled exception in handler", exc_info=err)
+    # Only the operator's own commands page; a stranger's message failing is log-only noise.
+    if update is None or not (isinstance(update, Update) and is_authorized(update)):
+        return
+    # A handler that timed out may already have acted (a broadcast may have gone out).
+    await safe_send(
+        context.bot,
+        ALLOWED_USER_ID,
+        f"❌ 명령 처리 실패 ({type(err).__name__}): {redact_tokens(str(err))}\n"
+        "발송 명령이었다면 다시 보내기 전에 결과를 확인하세요.",
+        parse_mode=None,
+    )
 
 
 _req = HTTPXRequest(
@@ -832,7 +703,8 @@ app.add_handler(
 if __name__ == "__main__":
     if not acquire_single_instance():
         print("another telegram bridge instance is already running; exiting.")
-        sys.exit(1)
+        # start_bot.bat ends its restart loop on this exit code.
+        sys.exit(3)
     # Both paths: the finally covers a normal return and an exception, atexit
     # covers interpreter shutdown routes that skip it (sys.exit from a handler).
     atexit.register(release_single_instance)

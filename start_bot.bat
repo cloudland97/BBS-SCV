@@ -27,6 +27,22 @@ if errorlevel 1 (
     )
 )
 
+:: Restart loop: a crashed bridge comes back after 10s, doubling to a 60s cap.
+set BACKOFF=10
+:run
 echo Starting telegram bridge...
 "%PYTHON%" "%~dp0telegram_bridge.py"
-pause
+set RC=%errorlevel%
+:: 3 = another bridge holds the single-instance lock (telegram_bridge.py __main__);
+:: that bridge has its own launcher, so this one stops instead of retrying forever.
+if "%RC%"=="3" (
+    echo Another telegram bridge is already running; launcher exiting.
+    exit /b 0
+)
+echo Telegram bridge exited with code %RC%; restarting in %BACKOFF%s...
+:: ping, not timeout: timeout.exe aborts immediately when stdin is not a console.
+set /a PINGS=BACKOFF+1
+ping -n %PINGS% 127.0.0.1 > nul
+set /a BACKOFF=BACKOFF*2
+if %BACKOFF% gtr 60 set BACKOFF=60
+goto run

@@ -110,15 +110,28 @@ def _to_kst(iso: str) -> str:
     return (dt + timedelta(hours=9)).strftime("%m-%d %H:%M")
 
 
+def is_authorized(update) -> bool:
+    """True only for the admin user in a private chat with the bot.
+
+    A group chat would echo admin output to every member.
+    """
+    # effective_user is None for channel posts; check before dereferencing.
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    return (
+        user is not None
+        and user.id == ALLOWED_USER_ID
+        and chat is not None
+        and getattr(chat, "type", None) == "private"
+    )
+
+
 def admin_only(func):
     """Decorator: reject non-admin users silently."""
 
     @wraps(func)
     async def wrapper(update, context):
-        # effective_user is None for channel posts; check before dereferencing to
-        # avoid an AttributeError before the permission check runs.
-        user = update.effective_user
-        if user is None or user.id != ALLOWED_USER_ID:
+        if not is_authorized(update):
             return
         return await func(update, context)
 

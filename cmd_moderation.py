@@ -38,10 +38,16 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def _do_restart():
         await asyncio.sleep(1)
         bat = Path(__file__).parent / "start_bot.bat"
+        # cmd /c in its own minimized console, which closes when the bat ends;
+        # `start x.bat` would run it under cmd /K and leave an idle console behind.
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 7  # SW_SHOWMINNOACTIVE
         subprocess.Popen(
-            ["cmd", "/c", "start", "", "/min", str(bat)],
+            ["cmd", "/c", str(bat)],
             cwd=str(bat.parent),
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            startupinfo=si,
+            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         # The spawned bat kills this process within ~2s; exit is handled there.
 
@@ -85,7 +91,7 @@ async def cmd_reboot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = (update.message.text or "").split(maxsplit=1)
     arg = parts[1].strip().lower() if len(parts) > 1 else ""
 
-    # Typos routed here by the "!reb" guard must never reboot; only the exact word counts.
+    # Only the exact command word and argument reboot.
     if parts[0] != "!reboot" or arg not in ("ok", "cc"):
         await _utils.safe_reply(update.message, _REBOOT_USAGE)
         return

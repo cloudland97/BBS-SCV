@@ -15,7 +15,7 @@
 
 ## 커맨드 목록
 
-전체 표는 `README.md`가 단일 진실원본. 코드 기준은 `telegram_bridge.py`의 `_CMD_ROUTES` + 별도 라우팅되는 `!news`/`!news2`/`!newslist`/`!newscc`.
+전체 표는 `README.md`가 단일 진실원본. 코드 기준은 `telegram_bridge.py`의 `_CMD_ROUTES` + 별도 라우팅되는 `!news`/`!news2`.
 
 ## 봉봉뉴스 발송 구조
 

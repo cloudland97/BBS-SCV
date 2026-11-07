@@ -209,7 +209,11 @@ class TestRestartCommandShape:
         update = type(
             "U",
             (),
-            {"message": _Msg(), "effective_user": type("X", (), {"id": ALLOWED_USER_ID})()},
+            {
+                "message": _Msg(),
+                "effective_user": type("X", (), {"id": ALLOWED_USER_ID})(),
+                "effective_chat": type("C", (), {"type": "private"})(),
+            },
         )()
         asyncio.run(cd.cmd_drestart(update, None))
 

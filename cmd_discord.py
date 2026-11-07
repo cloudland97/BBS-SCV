@@ -30,12 +30,29 @@ def _bot_log_path(logs_dir):
     return logs_dir / "bot.log"
 
 
-def _error_log_path(logs_dir, days_ago: int, target_date: str):
-    """Path of the BBS error log for a given age in days.
+_DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) ")
 
-    Today's errors are in error.log; older days rotate to error.log.YYYY-MM-DD.
+
+def _error_lines_for(logs_dir, target_date: str):
+    """Lines logged on target_date across error.log and its rotated copies; None if none exist.
+
+    BBS rotates only when the next error is written, so any one file can span several days.
     """
-    return logs_dir / ("error.log" if days_ago == 0 else f"error.log.{target_date}")
+    files = [f for f in sorted(logs_dir.glob("error.log.*")) if f.is_file()]
+    if (logs_dir / "error.log").is_file():
+        files.append(logs_dir / "error.log")
+    if not files:
+        return None
+    picked = []
+    for f in files:
+        current = None  # traceback lines carry no date; they belong to the entry above
+        for ln in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = _DATE_PREFIX_RE.match(ln)
+            if m:
+                current = m.group(1)
+            if current == target_date and ln.strip():
+                picked.append(ln)
+    return picked
 
 
 @admin_only
@@ -190,25 +207,25 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days_ago = min(int(m.group(1)), _MAX_LOG_DAYS) if m else 0
 
     target_date = (datetime.now(_KST) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
-    err_file = _error_log_path(_cfg.DISCORD_LOGS_PATH, days_ago, target_date)
     label = "오늘" if days_ago == 0 else f"{days_ago}일 전 ({target_date})"
 
-    if not err_file.exists():
-        await _utils.safe_reply(update.message, f"No error log for {target_date}")
+    try:
+        lines = await asyncio.to_thread(_error_lines_for, _cfg.DISCORD_LOGS_PATH, target_date)
+    except Exception as e:
+        _cfg.log.warning(f"!log read failed: {e}")
+        await _utils.safe_reply(
+            update.message, f"Error log read failed: {_cfg.redact_tokens(str(e))}", parse_mode=None
+        )
         return
 
-    try:
-        raw = err_file.read_text(encoding="utf-8")
-    except Exception:
-        raw = ""
-
-    if not raw.strip():
+    if lines is None:
+        await _utils.safe_reply(update.message, f"No error log for {target_date}")
+        return
+    if not lines:
         await _utils.safe_reply(update.message, f"No errors {label}")
         return
 
-    tail = raw[-2000:] if len(raw) > 2000 else raw
-    lines = tail.strip().split("\n")
-    total = raw.count("[ERROR]")
+    total = sum("[ERROR]" in ln for ln in lines)
     header = f"*Error Log* ({label}) — {total} error(s)\n\n"
     body = "\n".join(f"`{ln[:120]}`" for ln in lines[-20:])
     await _utils.safe_reply(update.message, header + body)

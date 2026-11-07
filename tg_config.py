@@ -18,8 +18,9 @@ KST = timezone(timedelta(hours=9))
 
 # -- Logging setup --
 
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# TG_LOG_DIR lets the test suite keep its records out of the live bridge.log.
+LOG_DIR = Path(os.getenv("TG_LOG_DIR") or Path(__file__).parent / "logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Written by !re0 just before the relaunch; the next bridge's post_init reports completion and removes it.
 RESTART_MARKER = LOG_DIR / "restart_pending"
 
@@ -208,7 +209,7 @@ def open_db(db_path: Optional[Path] = None):
 
 
 # Tables owned by the BBS discord bot that this bridge reads from. scheduled_news
-# is intentionally excluded (this bridge creates it itself via _ensure_table).
+# is excluded: this bridge created it, and now only reads it once at boot.
 EXPECTED_SHARED_TABLES = (
     "loop_health",
     "loop_health_daily",
@@ -325,22 +326,31 @@ async def fetch_rows_async(sql: str, params: tuple = ()) -> list:
     return await db_read_async(lambda conn: conn.execute(sql, params).fetchall())
 
 
-# Loop monitor thresholds (minutes)
+# Loop monitor thresholds (minutes): ~3-4x each loop's recorded interval, measured from
+# bbs.db loop_health_daily run_count over 2026-11-05..07 (e.g. 272/day = one per ~5.3 min).
 LOOP_ALERT_THRESHOLDS = {
-    "market_loop": 120,
-    "morning_loop": 180,
-    "feed_loop": 60,
-    "pubg_daily_loop": 1440,
-    "live_score_loop": 360,
-    "notify_loop": 360,
-    "lineup_loop": 360,
-    "result_loop": 360,
-    "f1_standings_loop": 120,
-    "f1_result_loop": 120,
-    "rate_alert_loop": 1440,
-    # ark_loop fires once a day at 20:00 KST, so last_run is always up to 24h old.
-    # With no entry here it fell to the 180-minute default and reported "no
-    # response" for most of every day. 26h leaves headroom for a restart.
-    "ark_loop": 1560,
+    "market_loop": 20,  # ~5.3 min
+    "morning_loop": 20,  # ~5.3 min
+    "rate_alert_loop": 20,  # ~5.6 min
+    "pubg_daily_loop": 20,  # ~5.6 min
+    "live_score_loop": 20,  # ~5.6 min
+    "keep_alive_loop": 20,  # 6 min
+    "notify_loop": 30,  # ~7.8 min
+    "lineup_loop": 30,  # ~7.8 min
+    "result_loop": 30,  # ~7.8 min
+    "f1_session_result_loop": 30,  # ~7.8 min
+    "feed_loop": 40,  # 10 min
+    "f1_standings_loop": 120,  # 30 min
+    "f1_result_loop": 120,  # 30 min
+    "bluearchive_loop": 120,  # 30 min
+    "booth_loop": 120,  # 30 min
+    "treasury_loop": 120,  # 30 min
+    "wal_checkpoint_loop": 240,  # 60 min
+    "ark_loop": 4320,  # once a day at 20:00 KST
 }
+LOOP_ALERT_DEFAULT_MIN = 180
+# Newest last_run across all loops older than this means the whole BBS bot is down.
+BBS_DOWN_THRESHOLD_MIN = 15
 LOOP_ALERT_COOLDOWN_SEC = 6 * 3600  # 6h per loop
+# Persisted so a bridge restart does not re-send an alert still inside its cooldown.
+LOOP_ALERT_STATE_PATH = LOG_DIR / "loop_alert_state.json"

@@ -9,10 +9,10 @@
 | 단계 | 액션 | 목적 |
 |------|------|------|
 | 1 | `Grep "startswith" telegram_bridge.py` | 라우팅 방식이 `startswith`인지 확인 |
-| 2 | `Grep "!<충돌prefix>" telegram_bridge.py -C2` | `_CMD_ROUTES` 내 등록 순서 확인 |
-| 3 | 더 긴 prefix를 더 짧은 prefix 위 줄로 이동 | 긴 prefix가 먼저 매칭되도록 수정 |
+| 2 | `Grep "!<충돌prefix>" telegram_bridge.py -C2` | `_ATTACHED_ARG_PREFIXES` 내 등록 순서 확인 |
+| 3 | 첫 단어 정확 일치가 기본이므로, prefix 매칭이 필요한 명령만 `_ATTACHED_ARG_PREFIXES`에 넣고 그 안에서 긴 것을 앞에 둔다 | 짧은 prefix가 긴 명령을 가로채지 않게 수정 |
 
-**체크리스트:** `!re`/`!re0`, `!news`/`!news2`/`!newslist`/`!newscc` 등 같은 시작문자 쌍 전수 확인
+**체크리스트:** `!re`/`!re0`, `!news`/`!news2` 등 같은 시작문자 쌍 전수 확인
 
 ---
 

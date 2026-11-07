@@ -30,10 +30,10 @@ class FakeMessage:
 
 
 class FakeUpdate:
-    def __init__(self, text, user_id=ALLOWED_USER_ID):
+    def __init__(self, text, user_id=ALLOWED_USER_ID, chat_type="private"):
         self.message = FakeMessage(text)
         self.effective_user = type("U", (), {"id": user_id})()
-        self.effective_chat = type("C", (), {"id": user_id})()
+        self.effective_chat = type("C", (), {"id": user_id, "type": chat_type})()
 
 
 # ── Discord REST stand-ins ───────────────────────────────────────────────────

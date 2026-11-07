@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -19,7 +20,7 @@ from tg_config import (
     log,
     open_db,
 )
-from tg_utils import split_message, u16_len
+from tg_utils import safe_reply, split_message, u16_len
 
 # Cap Discord API calls so a hung request can't stall a broadcast for minutes
 # (aiohttp's default total timeout is 300s).
@@ -132,8 +133,19 @@ def _save_latest(content: str) -> None:
         log.info("bongnews latest not updated: broadcast carried no text")
         return
     try:
+        # temp + os.replace: the BBS feed must never read a half-written file.
         latest_path = DISCORD_DATA_PATH / "bongnews_latest.txt"
-        latest_path.write_text(body, encoding="utf-8")
+        tmp_path = latest_path.with_name(latest_path.name + ".tmp")
+        tmp_path.write_text(body, encoding="utf-8")
+        # Windows refuses the rename while BBS has the file open; that read is brief.
+        for attempt in range(3):
+            try:
+                os.replace(tmp_path, latest_path)
+                break
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.2)
     except Exception as e:
         log.warning(f"Failed to save bongnews latest: {e}")
 
@@ -346,15 +358,6 @@ async def _send_all(session, token, subscribers, msg_text, file_bytes, filename,
     return await asyncio.gather(*[_one(uid) for uid in subscribers], return_exceptions=True)
 
 
-async def _send_summary(bot, chat_id, text) -> None:
-    """Send an operator summary, absorbing any Telegram-side failure — a raised
-    error here must never look like "the broadcast failed" to the caller."""
-    try:
-        await bot.send_message(chat_id=chat_id, text=text)
-    except Exception as e:
-        log.error(f"bongnews summary send failed: {e}")
-
-
 async def _broadcast_bbnews(
     update: Update,
     content: str,
@@ -373,9 +376,6 @@ async def _broadcast_bbnews(
         await update.message.reply_text("No bongnews subscribers.")
         return
 
-    # Save full content for feed embed
-    await _save_latest_async(content)
-
     status_msg = await update.message.reply_text(f"Sending to {len(subscribers)} subscribers..")
     msg_text, embed, upload_name = _news_message(content, filename)
 
@@ -386,50 +386,17 @@ async def _broadcast_bbnews(
     ok = sum(1 for r in results if r is True)
     failed_uids = [str(subscribers[i]) for i, r in enumerate(results) if r is not True]
 
+    # Log first: the DMs are out, so a Telegram failure below must not hide the result.
+    log.info(f"bbnews sent: ok {ok}, fail {len(failed_uids)}")
+    if ok:
+        await _save_latest_async(content)
+
     summary = f"broadcast done: ok {ok} / fail {len(failed_uids)}"
     if failed_uids:
         summary += "\nfailed UIDs: " + ", ".join(failed_uids)
-    await status_msg.edit_text(summary)
-    log.info(f"bbnews sent: ok {ok}, fail {len(failed_uids)}")
-
-
-async def _broadcast_bbnews_auto(
-    bot,
-    chat_id: int,
-    content: str,
-    file_bytes: Optional[bytes] = None,
-    filename: Optional[str] = None,
-) -> tuple[int, int]:
-    """Broadcast bongnews without an Update object (scheduled/automated sends).
-
-    Returns (ok, fail). (0,0) = not attempted, must not be recorded as 'sent'. Never raises for delivery problems.
-    """
-    token = await _get_discord_token_async()
-    if not token:
-        await _send_summary(bot, chat_id, "❌ 예약 뉴스 발송 실패: Discord token not found.")
-        return 0, 0
-    subscribers = await _get_bongnews_subscribers_async()
-    if subscribers is None:
-        await _send_summary(
-            bot, chat_id, "❌ 예약 뉴스 발송 실패: Subscriber lookup failed (bbs.db unreadable)."
-        )
-        return 0, 0
-    if not subscribers:
-        await _send_summary(bot, chat_id, "❌ 예약 뉴스 발송 실패: No subscribers.")
-        return 0, 0
-
-    await _save_latest_async(content)
-
-    msg_text, embed, upload_name = _news_message(content, filename)
-    async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as session:
-        results = await _send_all(
-            session, token, subscribers, msg_text, file_bytes, upload_name, embed
-        )
-    ok = sum(1 for r in results if r is True)
-    failed_uids = [str(subscribers[i]) for i, r in enumerate(results) if r is not True]
-    summary = f"📤 예약 뉴스 발송 완료: {ok}/{len(subscribers)}"
-    if failed_uids:
-        summary += "\nfailed: " + ", ".join(failed_uids)
-    await _send_summary(bot, chat_id, summary)
-    log.info(f"scheduled bbnews sent: ok {ok}, fail {len(failed_uids)}")
-    return ok, len(failed_uids)
+    try:
+        await status_msg.edit_text(summary)
+    except Exception as e:
+        # A raised edit would read as "send failed" and invite a duplicate broadcast.
+        log.warning(f"bbnews status edit failed, replying instead: {e}")
+        await safe_reply(update.message, summary, parse_mode=None)
