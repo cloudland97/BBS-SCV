@@ -49,13 +49,13 @@ Monitor loop health, view logs, manage subscribers, and send BongBong News broad
 - **Single-user**: Only `CHAT_ID`, in a private chat with the bot, can interact
 - **Polling-based**: No webhooks or inline keyboards
 - **Shared DB**: Reads `bbs.db` from BBS Discord bot (`BBS_DB_PATH`). Runs standalone without it — DB-backed features (stats, loop monitor) skip gracefully until the bot exists
-- **Loop monitor**: Checks Discord bot health every 5min. Alerts when a loop exceeds its threshold (`LOOP_ALERT_THRESHOLDS`, ~3-4x its interval) or when no loop has run for 15min (bot down), and again when it recovers. Alert cooldowns persist in `logs/loop_alert_state.json`
+- **Loop monitor**: Checks Discord bot health every 5min. Alerts when a loop exceeds its threshold (`loop_threshold_min`: max(20 min, 4x its interval from BBS `utils/loop_registry.py`, read statically; `LOOP_ALERT_OVERRIDES` for exceptions)) or when no loop has run for 15min (bot down), and again when it recovers. Alert cooldowns persist in `logs/loop_alert_state.json`
 - **Single instance**: claims `logs/bridge.pid` on startup; a second instance exits instead of racing the first (a stale/dead pid file never blocks startup)
 - **Daily maintenance**: log retention (`_cleanup_old_logs`, 30 days) and a heartbeat log line run once a day in-process, not just at `post_init` — otherwise a bridge that stays up for weeks never prunes, and a healthy-but-quiet bridge is indistinguishable from a dead one in the logs
 - **Token redaction**: a logging filter strips any Telegram bot token (`bot<id>:<secret>` pattern) from log records before they're written, regardless of which library emitted the line
 - **`!log`** reads the BBS bot's `logs/error.log` and every rotated `logs/error.log.*`, keeping the lines whose date prefix matches the requested day (BBS rotates only when the next error is written)
 - **`!re` restart** targets processes under the `BBS_RESTART_ROOT` env var (set to the BBS Discord bot path before the kill command runs), so it never touches sibling checkouts like `bbs-web` or `claxx`
-- **Scheduled news** was removed; the `scheduled_news` table stays in `bbs.db`, and leftover `pending` rows are only logged as a WARNING at boot, never sent
+- **Scheduled news** was removed; the `scheduled_news` table stays in `bbs.db` untouched
 
 ## Files
 

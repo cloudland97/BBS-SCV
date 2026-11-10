@@ -1,5 +1,6 @@
 """Telegram bridge configuration — env loading, paths, constants."""
 
+import ast
 import asyncio
 import logging
 import os
@@ -7,7 +8,7 @@ import random
 import re
 import sqlite3
 import time
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -208,8 +209,8 @@ def open_db(db_path: Optional[Path] = None):
     return get_bbs_db()
 
 
-# Tables owned by the BBS discord bot that this bridge reads from. scheduled_news
-# is excluded: this bridge created it, and now only reads it once at boot.
+# Tables owned by the BBS discord bot that this bridge reads by name. Other
+# *_subscribers tables are discovered (list_subscriber_tables), not listed here.
 EXPECTED_SHARED_TABLES = (
     "loop_health",
     "loop_health_daily",
@@ -217,15 +218,21 @@ EXPECTED_SHARED_TABLES = (
     "user_dm",
     "bongnews_subscribers",
     "subscribers",
-    "market_subscribers",
-    "ark_subscribers",
     "morning_subscribers",
     "pubg_subscribers",
-    "treasury_subscribers",
-    "bluearchive_subscribers",
-    "booth_subscribers",
     "subscription_events",
 )
+
+
+def list_subscriber_tables(conn) -> list[str]:
+    """Names of every subscriber table in bbs.db: '*_subscribers' plus the bare 'subscribers'."""
+    return sorted(
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND (name LIKE '%\\_subscribers' ESCAPE '\\' OR name = 'subscribers')"
+        ).fetchall()
+    )
 
 
 def check_shared_schema() -> list[str]:
@@ -326,29 +333,92 @@ async def fetch_rows_async(sql: str, params: tuple = ()) -> list:
     return await db_read_async(lambda conn: conn.execute(sql, params).fetchall())
 
 
-# Loop monitor thresholds (minutes): ~3-4x each loop's recorded interval, measured from
-# bbs.db loop_health_daily run_count over 2026-11-05..07 (e.g. 272/day = one per ~5.3 min).
-LOOP_ALERT_THRESHOLDS = {
-    "market_loop": 20,  # ~5.3 min
-    "morning_loop": 20,  # ~5.3 min
-    "rate_alert_loop": 20,  # ~5.6 min
-    "pubg_daily_loop": 20,  # ~5.6 min
-    "live_score_loop": 20,  # ~5.6 min
-    "keep_alive_loop": 20,  # 6 min
-    "notify_loop": 30,  # ~7.8 min
+# Loop monitor thresholds (minutes) default to max(20, 4 x interval); see loop_threshold_min.
+# Overrides below differ from that on purpose.
+LOOP_ALERT_OVERRIDES = {
+    "notify_loop": 30,  # ~7.8 min measured from loop_health_daily 2026-11-05..07
     "lineup_loop": 30,  # ~7.8 min
     "result_loop": 30,  # ~7.8 min
     "f1_session_result_loop": 30,  # ~7.8 min
-    "feed_loop": 40,  # 10 min
-    "f1_standings_loop": 120,  # 30 min
-    "f1_result_loop": 120,  # 30 min
-    "bluearchive_loop": 120,  # 30 min
-    "booth_loop": 120,  # 30 min
-    "treasury_loop": 120,  # 30 min
-    "wal_checkpoint_loop": 240,  # 60 min
     "ark_loop": 4320,  # once a day at 20:00 KST
 }
 LOOP_ALERT_DEFAULT_MIN = 180
+LOOP_ALERT_MIN_MIN = 20
+# A daily loop without an override must still alert within about a day, not 4 x 24 h.
+LOOP_ALERT_MAX_MIN = 1500
+_THRESHOLD_TTL_SEC = 3600
+_threshold_cache: tuple[float, dict[str, float]] | None = None
+
+
+def _registry_intervals_sec() -> dict[str, int]:
+    """loop id -> interval_sec read statically from the BBS loop_registry (never imported)."""
+    tree = ast.parse((_discord_root / "utils" / "loop_registry.py").read_text(encoding="utf-8"))
+    out: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "LoopDefinition":
+            kw = {k.arg: k.value for k in node.keywords}
+            if "id" in kw and "interval_sec" in kw:
+                try:
+                    out[ast.literal_eval(kw["id"])] = ast.literal_eval(kw["interval_sec"])
+                except ValueError:
+                    continue
+    return out
+
+
+def _yesterday_run_counts() -> dict[str, int]:
+    kst_today = datetime.now(timezone(timedelta(hours=9))).date()
+    yesterday = (kst_today - timedelta(days=1)).isoformat()
+    conn = get_bbs_db()
+    try:
+        return {
+            r[0]: r[1]
+            for r in conn.execute(
+                "SELECT loop_id, run_count FROM loop_health_daily WHERE date = ?", (yesterday,)
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _clamp(minutes: float) -> float:
+    return min(LOOP_ALERT_MAX_MIN, max(LOOP_ALERT_MIN_MIN, minutes))
+
+
+def _build_thresholds() -> dict[str, float]:
+    thresholds: dict[str, float] = {}
+    try:
+        runs = _yesterday_run_counts() if BBS_DB_PATH.exists() else {}
+    except Exception as e:  # any failure falls back to the default, never stops the monitor
+        log.warning("loop_health_daily unreadable: %s", e)
+        runs = {}
+    for loop_id, count in runs.items():
+        if isinstance(count, int) and count > 0:
+            thresholds[loop_id] = _clamp(4 * 1440 / count)
+    try:
+        for loop_id, sec in _registry_intervals_sec().items():
+            if isinstance(sec, (int, float)) and not isinstance(sec, bool) and sec > 0:
+                thresholds[loop_id] = _clamp(4 * sec / 60)
+    except Exception as e:
+        log.warning("loop_registry unreadable, using run counts/default: %s", e)
+    thresholds.update(LOOP_ALERT_OVERRIDES)
+    return thresholds
+
+
+def refresh_loop_thresholds(force: bool = False) -> None:
+    """Rebuild the threshold cache when stale; call off the event loop (it touches sqlite and disk)."""
+    global _threshold_cache
+    now = time.monotonic()
+    if force or _threshold_cache is None or now - _threshold_cache[0] > _THRESHOLD_TTL_SEC:
+        _threshold_cache = (now, _build_thresholds())
+
+
+def loop_threshold_min(loop_id: str) -> float:
+    """Stale-after minutes for a loop from the cache filled by refresh_loop_thresholds."""
+    if _threshold_cache is None:
+        return LOOP_ALERT_OVERRIDES.get(loop_id, LOOP_ALERT_DEFAULT_MIN)
+    return _threshold_cache[1].get(loop_id, LOOP_ALERT_DEFAULT_MIN)
+
+
 # Newest last_run across all loops older than this means the whole BBS bot is down.
 BBS_DOWN_THRESHOLD_MIN = 15
 LOOP_ALERT_COOLDOWN_SEC = 6 * 3600  # 6h per loop

@@ -13,6 +13,37 @@ import discord_helpers as _dh
 from tg_utils import admin_only, _to_kst, md_escape, parse_user_id
 
 
+_SUBSCRIBER_LABELS = {
+    "bongnews_subscribers": "봉봉뉴스",
+    "subscribers": "토트넘/F1",
+    "market_subscribers": "시황",
+    "ark_subscribers": "ARK",
+    "morning_subscribers": "아침브리핑",
+    "pubg_subscribers": "PUBG",
+    "treasury_subscribers": "MSTR 공시",
+    "bluearchive_subscribers": "블루 아카이브",
+    "booth_subscribers": "Booth",
+    "kor_nt_subscribers": "축구 국가대표",
+    "tarkov_subscribers": "타르코프",
+    "epic_subscribers": "에픽 무료 게임",
+}
+# Extra column per table that needs more than user_id; others use the generic path.
+_SUBSCRIBER_EXTRA_COL = {
+    "subscribers": "mode",
+    "market_subscribers": "mode",
+    "morning_subscribers": "cities",
+    "pubg_subscribers": "nickname",
+}
+
+
+def _city_str(raw) -> str:
+    try:
+        city_list = json.loads(raw)
+        return ", ".join(city_list) if city_list else "—"
+    except Exception:
+        return str(raw)
+
+
 @admin_only
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """!list — subscriber list per category from SQLite."""
@@ -22,55 +53,23 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_uids: set[str] = set()
 
     def _read(conn):
-        _ALLOWED_TABLES = {
-            "bongnews_subscribers",
-            "subscribers",
-            "market_subscribers",
-            "ark_subscribers",
-            "morning_subscribers",
-            "pubg_subscribers",
-            "treasury_subscribers",
-            "bluearchive_subscribers",
-            "booth_subscribers",
-        }
-        _ALLOWED_COLS = {"user_id", "mode", "cities", "nickname"}
-
-        def _rows(table, *cols):
-            if table not in _ALLOWED_TABLES:
-                raise ValueError(f"Table not allowed: {table}")
-            if not all(c in _ALLOWED_COLS for c in cols):
-                raise ValueError(f"Column not allowed: {set(cols) - _ALLOWED_COLS}")
-            return conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
-
-        return (
-            _rows("bongnews_subscribers", "user_id"),
-            _rows("subscribers", "user_id", "mode"),
-            _rows("market_subscribers", "user_id", "mode"),
-            _rows("ark_subscribers", "user_id"),
-            _rows("morning_subscribers", "user_id", "cities"),
-            _rows("pubg_subscribers", "user_id", "nickname"),
-            _rows("treasury_subscribers", "user_id"),
-            _rows("bluearchive_subscribers", "user_id"),
-            _rows("booth_subscribers", "user_id"),
-        )
+        found = _cfg.list_subscriber_tables(conn)
+        known = [t for t in _SUBSCRIBER_LABELS if t in found]
+        ordered = known + [t for t in found if t not in _SUBSCRIBER_LABELS]
+        result = []
+        for table in ordered:
+            extra = _SUBSCRIBER_EXTRA_COL.get(table)
+            cols = f"user_id, {extra}" if extra else "user_id"
+            # Table name comes from sqlite_master, quoted as an identifier.
+            ident = '"' + table.replace('"', '""') + '"'
+            result.append((table, conn.execute(f"SELECT {cols} FROM {ident}").fetchall()))
+        return result
 
     # Queries against the shared bbs.db; off the event loop so a BBS-side
     # write lock cannot stall Telegram polling.
-    (
-        bongnews,
-        spurs,
-        market,
-        ark,
-        morning,
-        pubg,
-        treasury,
-        bluearchive,
-        booth,
-    ) = await _cfg.db_read_async(_read)
+    tables = await _cfg.db_read_async(_read)
 
-    for rows in (bongnews, spurs, market, ark, morning, pubg):
-        all_uids.update(str(r["user_id"]) for r in rows)
-    for rows in (treasury, bluearchive, booth):
+    for _, rows in tables:
         all_uids.update(str(r["user_id"]) for r in rows)
 
     names = await _dh._fetch_discord_usernames(list(all_uids))
@@ -82,35 +81,24 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["📋 *구독자 목록*\n"]
 
-    def _section(label, rows, fmt):
+    for table, rows in tables:
+        label = _SUBSCRIBER_LABELS.get(table, table)
+        extra = _SUBSCRIBER_EXTRA_COL.get(table)
         uids = sorted({r["user_id"] for r in rows})
-        lines.append(f"*{label}* ({len(uids)}명)")
-        for uid in uids:
-            lines.append(fmt(uid, [r for r in rows if r["user_id"] == uid]))
+        lines.append(f"*{md_escape(label)}* ({len(uids)}명)")
+        if extra == "cities":
+            for r in rows:
+                lines.append(f"  · {_n(r['user_id'])} — {md_escape(_city_str(r['cities']))}")
+        else:
+            for uid in uids:
+                mine = [r for r in rows if r["user_id"] == uid]
+                if extra == "mode":
+                    lines.append(f"  · {_n(uid)} `{mine[0]['mode']}`")
+                elif extra == "nickname":
+                    lines.append(f"  · {_n(uid)} `{', '.join(r['nickname'] for r in mine)}`")
+                else:
+                    lines.append(f"  · {_n(uid)}")
         lines.append("")
-
-    _section("봉봉뉴스", bongnews, lambda uid, _: f"  · {_n(uid)}")
-    _section("토트넘/F1", spurs, lambda uid, rs: f"  · {_n(uid)} `{rs[0]['mode']}`")
-    _section("시황", market, lambda uid, rs: f"  · {_n(uid)} `{rs[0]['mode']}`")
-    _section("ARK", ark, lambda uid, _: f"  · {_n(uid)}")
-
-    lines.append(f"*아침브리핑* ({len({r['user_id'] for r in morning})}명)")
-    for r in morning:
-        try:
-            city_list = json.loads(r["cities"])
-            city_str = ", ".join(city_list) if city_list else "—"
-        except Exception:
-            city_str = str(r["cities"])
-        city_str = md_escape(city_str)
-        lines.append(f"  · {_n(r['user_id'])} — {city_str}")
-    lines.append("")
-
-    _section(
-        "PUBG", pubg, lambda uid, rs: f"  · {_n(uid)} `{', '.join(r['nickname'] for r in rs)}`"
-    )
-    _section("MSTR 공시", treasury, lambda uid, _: f"  · {_n(uid)}")
-    _section("블루 아카이브", bluearchive, lambda uid, _: f"  · {_n(uid)}")
-    _section("Booth", booth, lambda uid, _: f"  · {_n(uid)}")
 
     lines.append(f"전체 이용자: {len(all_uids)}명")
     await _utils.safe_reply(update.message, "\n".join(lines))

@@ -46,7 +46,6 @@ class TestSafeMediaFilename:
 class TestOrphanTempCleanup:
     def test_stale_temp_dirs_are_removed_and_fresh_ones_kept(self, tmp_path, monkeypatch):
         monkeypatch.setattr(tb.tempfile, "gettempdir", lambda: str(tmp_path))
-        monkeypatch.setattr(tb, "PROJECTS", {})
 
         stale = tmp_path / f"{tb._TEMP_PREFIX}old"
         stale.mkdir()

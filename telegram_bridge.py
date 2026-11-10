@@ -37,16 +37,14 @@ from tg_config import (
     BOT_TOKEN,
     LOG_DIR,
     LOOP_ALERT_COOLDOWN_SEC,
-    LOOP_ALERT_DEFAULT_MIN,
     LOOP_ALERT_STATE_PATH,
-    LOOP_ALERT_THRESHOLDS,
-    PROJECTS,
     RESTART_MARKER,
     check_shared_schema,
     fetch_rows_async,
-    get_bbs_db,
     log,
+    loop_threshold_min,
     redact_tokens,
+    refresh_loop_thresholds,
 )
 from tg_utils import ensure_utc, is_authorized, safe_reply, safe_send
 from discord_helpers import _broadcast_bbnews
@@ -105,7 +103,7 @@ def _evaluate_loops(ages: dict[str, float], state: dict[str, float], now_ts: flo
     if state.pop(_BBS_DOWN_KEY, None) is not None:
         recoveries.append("✅ BBS bot loops running again")
     for loop_id, mins in sorted(ages.items()):
-        if mins > LOOP_ALERT_THRESHOLDS.get(loop_id, LOOP_ALERT_DEFAULT_MIN):
+        if mins > loop_threshold_min(loop_id):
             if _cooldown_over(state, loop_id, now_ts):
                 state[loop_id] = now_ts
                 alerts.append(f"⚠️ `{loop_id}` — {_fmt_age(mins)} no response")
@@ -132,6 +130,7 @@ async def _loop_monitor_task(app):
                 / 60
                 for row in rows
             }
+            await asyncio.to_thread(refresh_loop_thresholds)
             before = dict(state)
             alerts, recoveries = _evaluate_loops(ages, state, time.time())
             if state != before:
@@ -146,38 +145,6 @@ async def _loop_monitor_task(app):
                 log.info(f"Loop recovered: {recoveries}")
         except Exception as e:
             log.error(f"Loop monitor error: {e}")
-
-
-# -- Scheduled news: leftover rows are reported at boot, never sent --
-
-
-def _count_pending_scheduled_news() -> int:
-    conn = get_bbs_db()
-    try:
-        if not conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_news'"
-        ).fetchone():
-            return 0
-        return conn.execute(
-            "SELECT COUNT(*) FROM scheduled_news WHERE status = 'pending'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
-
-async def _warn_pending_scheduled_news() -> None:
-    """Boot-time WARNING for 'pending' rows left by the removed scheduler; they are never sent."""
-    try:
-        count = await asyncio.to_thread(_count_pending_scheduled_news)
-    except Exception as e:  # runs in post_init, which must never abort startup
-        log.warning(f"scheduled_news check failed: {e}")
-        return
-    if count:
-        log.warning(
-            "scheduled_news holds %d 'pending' row(s); scheduling was removed, so they "
-            "will not be sent (rows left untouched)",
-            count,
-        )
 
 
 # -- Photo / video / document handlers --
@@ -281,6 +248,11 @@ async def _dispatch_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t: 
     """Dispatch a text command by its exact first token."""
     parts = t.split(maxsplit=1)
     cmd = parts[0] if parts else ""
+    # Log only a known command name: attached forms like "!ud<uid>" carry user ids.
+    known = cmd if cmd in ("!news", "!news2") or cmd in _CMD_TABLE else None
+    if known is None:
+        known = next((p for p in _ATTACHED_ARG_PREFIXES if cmd.startswith(p)), "unknown")
+    log.info("command: %s", known)
     if cmd == "!news":
         await cmd_bbnews_text(update, parts[1] if len(parts) > 1 else "")
         return
@@ -354,8 +326,7 @@ def _cleanup_old_logs(days: int = 30):
 
 
 def _cleanup_orphan_temp(max_age_sec: int = 3600):
-    """Delete orphaned media-download temp dirs left behind by crashes — sweeps
-    the system temp dir, and the BBS project root for older builds' leftovers."""
+    """Delete orphaned media-download temp dirs left behind by crashes in the system temp dir."""
     cutoff = time.time() - max_age_sec
 
     def _remove_if_stale(entry: Path):
@@ -372,12 +343,6 @@ def _cleanup_orphan_temp(max_age_sec: int = 3600):
 
     for entry in Path(tempfile.gettempdir()).glob(f"{_TEMP_PREFIX}*"):
         _remove_if_stale(entry)
-    # Legacy location: the project tree, for older builds.
-    for proj_dir in {Path(p) for p in PROJECTS.values()}:
-        if not proj_dir.exists():
-            continue
-        for f in proj_dir.glob("_tg_*"):
-            _remove_if_stale(f)
 
 
 def _run_daily_maintenance():
@@ -587,12 +552,6 @@ async def post_init(application):
     check_shared_schema()
     _bg_tasks.append(asyncio.create_task(_loop_monitor_task(application)))
     _bg_tasks.append(asyncio.create_task(_maintenance_task()))
-    if BBS_DB_PATH.exists():
-        await _warn_pending_scheduled_news()
-    else:
-        # A standalone clone has no sibling BBS repo; connecting anyway would
-        # raise inside post_init and kill the bot before polling ever starts.
-        log.warning("bbs.db not found - boot scheduled-news check skipped")
     await _report_restart_done(application)
     log.info("Telegram bridge starting")
 

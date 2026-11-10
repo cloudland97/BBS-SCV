@@ -16,7 +16,7 @@ set PYTHON=%~dp0.venv\Scripts\python.exe
 if not exist "%PYTHON%" set PYTHON=python
 
 echo Checking dependencies...
-"%PYTHON%" -c "import telegram, aiohttp, telethon" > nul 2>&1
+"%PYTHON%" -c "import telegram, aiohttp" > nul 2>&1
 if errorlevel 1 (
     echo Installing missing packages...
     "%PYTHON%" -m pip install -r "%~dp0requirements.txt"
